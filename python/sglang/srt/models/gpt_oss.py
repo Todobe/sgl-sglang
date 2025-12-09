@@ -79,8 +79,18 @@ _is_npu = is_npu()
 if _is_cuda:
     from sgl_kernel import FusedSetKVBufferArg  # noqa: F401
 
-if _is_npu:
-    from sgl_kernel_npu.activation.swiglu_oai import swiglu_oai
+
+def swiglu_oai(layer, hidden_states):
+    E, N, _ = layer.w13_weight.size()
+    gate_up = hidden_states.view(-1, N)
+    alpha = layer.moe_runner_config.gemm1_alpha
+    limit = layer.moe_runner_config.gemm1_clamp_limit
+    gate, up = gate_up[..., ::2], gate_up[..., 1::2]
+    gate = gate.clamp(min=None, max=limit)
+    up = up.clamp(min=-limit, max=limit)
+    glu = gate * torch.sigmoid(gate * alpha)
+    gated_output = (up + 1) * glu
+    return gated_output
 
 
 class GptOssConfig(PretrainedConfig):
