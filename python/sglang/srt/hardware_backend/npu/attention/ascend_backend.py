@@ -60,7 +60,7 @@ def attention_sinks_prefill_kernel(
     D: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     MAX_BLOCKS: tl.constexpr,
-    sync_space,
+    # sync_space,
 ):
     i_b, i_qh = tl.program_id(0), tl.program_id(1)
     i_kvh = i_qh // (q_head_num // k_head_num)
@@ -73,7 +73,8 @@ def attention_sinks_prefill_kernel(
     for i_s in range(q_start_offset, q_end_offset, Br):
         kv_seq_len = tl.load(kv_seq_lens + i_b) + i_s - q_end_offset + 1
 
-        page_num = tl.cdiv(kv_seq_len, PAGE_SIZE)
+        page_num = tl.cdiv(kv_seq_len + Br, PAGE_SIZE)
+        page_num = min(page_num, MAX_BLOCKS)
 
         kv_seq_len_block = kv_seq_len + tl.arange(0, Br)
         start_kv_len_block = tl.zeros([Br], dtype=tl.int32)
@@ -130,7 +131,7 @@ def attention_sinks_prefill_kernel(
             # The purpose of this store is to insert synchronization within the loop.
             # Do not remove this store until triton solves the synchronization problem,
             # as doing so may lead to accuracy problem.
-            tl.store(sync_space + tl.arange(0, Br), new_e_max)
+            # tl.store(sync_space + tl.arange(0, Br), new_e_max)
             history_max = new_e_max
 
         sink = tl.math.exp(sink - history_max)
@@ -165,21 +166,21 @@ def attention_sinks_prefill_triton(
         dtype=query.dtype,
         device=query.device,
     )
-    sync_space = torch.empty(
-        (PAGE_SIZE,),
-        dtype=torch.float32,
-        device=query.device,
-    )
+    # sync_space = torch.empty(
+    #     (PAGE_SIZE,),
+    #     dtype=torch.float32,
+    #     device=query.device,
+    # )
 
-    if isinstance(context_lens, list):
-        context_lens = torch.tensor(context_lens, device=query.device)
-    else:
-        context_lens = context_lens.to(query.device)
+    # if isinstance(context_lens, list):
+    #     context_lens = torch.tensor(context_lens, device=query.device)
+    # else:
+    #     context_lens = context_lens.to(query.device)
 
-    if isinstance(seq_lens, list):
-        seq_lens = torch.tensor(seq_lens, device=query.device)
-    else:
-        seq_lens = seq_lens.to(query.device)
+    # if isinstance(seq_lens, list):
+    #     seq_lens = torch.tensor(seq_lens, device=query.device)
+    # else:
+    #     seq_lens = seq_lens.to(query.device)
     
     zero = torch.tensor([0], dtype=seq_lens.dtype, device=seq_lens.device)
     cum_seq_lens = torch.cat([zero, torch.cumsum(seq_lens, dim=0)])
@@ -202,7 +203,7 @@ def attention_sinks_prefill_triton(
         D,
         PAGE_SIZE,
         block_tables.stride(0),
-        sync_space,
+        # sync_space,
     )
 
     return attn_output.reshape(-1, q_head_num * v_head_dim)
@@ -225,13 +226,15 @@ def attention_sinks_kernel(
     D: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     MAX_BLOCKS: tl.constexpr,
-    sync_space,
+    # sync_space,
 ):
     i_s, i_gh = tl.program_id(0), tl.program_id(1)
     i_kvh = i_gh * block_group_size // (q_head_num // k_head_num)
 
     kv_seq_len = tl.load(kv_seq_lens + i_s)
     page_num = tl.cdiv(kv_seq_len, PAGE_SIZE)
+    page_num = min(page_num, MAX_BLOCKS)
+    
     start_page_num = 0
     start_kv_len = 0
     if sliding_window_size != -1 and kv_seq_len > sliding_window_size:
@@ -282,7 +285,7 @@ def attention_sinks_kernel(
         # The purpose of this store is to insert synchronization within the loop.
         # Do not remove this store until triton solves the synchronization problem,
         # as doing so may lead to accuracy problem.
-        tl.store(sync_space + tl.arange(0, Br), new_e_max)
+        # tl.store(sync_space + tl.arange(0, Br), new_e_max)
         history_max = new_e_max
 
     sink = tl.math.exp(sink - history_max)
@@ -319,16 +322,16 @@ def attention_sinks_triton(
         dtype=query.dtype,
         device=query.device,
     )
-    sync_space = torch.empty(
-        (PAGE_SIZE,),
-        dtype=torch.float32,
-        device=query.device,
-    )
+    # sync_space = torch.empty(
+    #     (PAGE_SIZE,),
+    #     dtype=torch.float32,
+    #     device=query.device,
+    # )
 
-    if isinstance(context_lens, list):
-        context_lens = torch.tensor(context_lens, device=query.device)
-    else:
-        context_lens = context_lens.to(query.device)
+    # if isinstance(context_lens, list):
+    #     context_lens = torch.tensor(context_lens, device=query.device)
+    # else:
+    #     context_lens = context_lens.to(query.device)
 
     grid = [S, group_block_num]
     attention_sinks_kernel[grid](
@@ -347,7 +350,7 @@ def attention_sinks_triton(
         D,
         PAGE_SIZE,
         block_tables.stride(0),
-        sync_space,
+        # sync_space,
     )
 
     return attn_output.reshape(-1, q_head_num * v_head_dim)
@@ -605,9 +608,15 @@ class AscendAttnBackend(AttentionBackend):
             // self.page_size
         )
         if forward_batch.extend_seq_lens is not None:
+            self.forward_metadata.extend_seq_lens = forward_batch.extend_seq_lens
             self.forward_metadata.extend_seq_lens_cpu_int = (
                 forward_batch.extend_seq_lens.cpu().int()
             )
+        if forward_batch.seq_lens is not None:
+            self.forward_metadata.seq_lens = forward_batch.seq_lens
+        else:
+            self.forward_metadata.seq_lens = forward_batch.seq_lens_cpu.to(self.device).int()
+
         self.forward_metadata.seq_lens_cpu_int = forward_batch.seq_lens_cpu.int()
         if (
             not forward_batch.forward_mode.is_draft_extend_v2()
@@ -973,9 +982,9 @@ class AscendAttnBackend(AttentionBackend):
                     k_cache,
                     v_cache,
                     sinks,
-                    self.forward_metadata.extend_seq_lens_cpu_int,
+                    self.forward_metadata.extend_seq_lens,
                     self.forward_metadata.block_tables,
-                    self.forward_metadata.seq_lens_cpu_int,
+                    self.forward_metadata.seq_lens,
                     layer.scaling,
                     layer.sliding_window_size,
                     layer.tp_q_head_num,
@@ -1637,7 +1646,7 @@ class AscendAttnBackend(AttentionBackend):
                     v_cache,
                     sinks,
                     self.forward_metadata.block_tables,
-                    self.forward_metadata.seq_lens_cpu_int,
+                    self.forward_metadata.seq_lens,
                     layer.scaling,
                     layer.sliding_window_size,
                     layer.tp_q_head_num,
