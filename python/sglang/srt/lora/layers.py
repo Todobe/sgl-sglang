@@ -70,7 +70,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
 
         self.output_offset = torch.tensor(
             [0, self.embed_dim],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=next(base_layer.parameters()).device,
         )
 
@@ -226,7 +226,7 @@ class ParallelLMHeadWithLoRA(BaseLayerWithLoRA):
         self.vocab_size = base_layer.org_vocab_size
         self.output_offset = torch.tensor(
             [0, self.vocab_size],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=next(base_layer.parameters()).device,
         )
 
@@ -311,7 +311,7 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
                 0,
                 shard_size,
             ],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=next(self.base_layer.parameters()).device,
         )
 
@@ -386,7 +386,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 shard_size,
                 2 * shard_size,
             ],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=next(self.base_layer.parameters()).device,
         )
 
@@ -434,7 +434,7 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 q_proj_shard_size + kv_proj_shard_size,
                 q_proj_shard_size + 2 * kv_proj_shard_size,
             ],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=next(self.base_layer.parameters()).device,
         )
         self.output_offset_cpu = self.output_offset.cpu()
@@ -513,7 +513,7 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
                 0,
                 output_size,
             ],
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=next(self.base_layer.parameters()).device,
         )
 

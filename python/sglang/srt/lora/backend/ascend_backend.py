@@ -28,7 +28,7 @@ class AscendLoRABackend(BaseLoRABackend):
         total_seq_len, _ = x.shape
         _, weight_out_dim, _ = weights.shape
 
-        output_tensor = torch.zeros(
+        output_tensor = torch.empty(
             (total_seq_len, weight_out_dim), dtype=torch.float, device=x.device
         )
         torch.ops.npu.sgemmv_shrink(
@@ -56,7 +56,7 @@ class AscendLoRABackend(BaseLoRABackend):
         _, weight_out_dim, _ = weights.shape
 
         if base_output is None:
-            output_tensor = torch.zeros(
+            output_tensor = torch.empty(
                 (total_seq_len, weight_out_dim), device=x.device, dtype=x.dtype
             )
         else:
@@ -91,13 +91,13 @@ class AscendLoRABackend(BaseLoRABackend):
         _, weight_out_dim, _ = qkv_lora_b.shape
 
         if base_output is None:
-            output_tensor = torch.zeros(
+            output_tensor = torch.empty(
                 (total_seq_len, weight_out_dim), device=x.device, dtype=x.dtype
             )
         else:
             output_tensor = base_output
 
-        lora_a_output = torch.zeros(
+        lora_a_output = torch.empty(
             total_seq_len, weight_intermediate_dim, dtype=torch.float, device=x.device
         )
 
@@ -141,13 +141,13 @@ class AscendLoRABackend(BaseLoRABackend):
         _, weight_out_dim, _ = gate_up_lora_b.shape
 
         if base_output is None:
-            output_tensor = torch.zeros(
+            output_tensor = torch.empty(
                 (total_seq_len, weight_out_dim), device=x.device, dtype=x.dtype
             )
         else:
             output_tensor = base_output
 
-        lora_a_output = torch.zeros(
+        lora_a_output = torch.empty(
             total_seq_len, weight_intermediate_dim, dtype=torch.float, device=x.device
         )
 
@@ -184,12 +184,12 @@ class AscendLoRABackend(BaseLoRABackend):
                 use_cuda_graph=True,
                 num_segments=None,
                 seg_lens=torch.full(
-                    (max_bs_in_cuda_graph,), num_tokens_per_bs, dtype=torch.int32
+                    (max_bs_in_cuda_graph,), num_tokens_per_bs, dtype=torch.int64
                 ),
-                seg_indptr=torch.empty(max_bs_in_cuda_graph + 1, dtype=torch.int32),
+                seg_indptr=torch.empty(max_bs_in_cuda_graph + 1, dtype=torch.int64),
                 max_len=num_tokens_per_bs,
                 weight_indices=torch.zeros(max_bs_in_cuda_graph, dtype=torch.int32),
-                lora_ranks=torch.zeros(self.max_loras_per_batch, dtype=torch.int32),
+                lora_ranks=torch.zeros(self.max_loras_per_batch, dtype=torch.int64),
                 scalings=torch.zeros(self.max_loras_per_batch, dtype=torch.float16),
                 permutation=None,
             )
@@ -215,7 +215,7 @@ class AscendLoRABackend(BaseLoRABackend):
             weight_indices, dtype=torch.int32, pin_memory=True, device="cpu"
         )
         lora_ranks_tensor = torch.tensor(
-            lora_ranks, dtype=torch.int32, pin_memory=True, device="cpu"
+            lora_ranks, dtype=torch.int64, pin_memory=True, device="cpu"
         )
         scalings_tensor = torch.tensor(
             scalings, dtype=torch.float16, pin_memory=True, device="cpu"
@@ -240,9 +240,9 @@ class AscendLoRABackend(BaseLoRABackend):
             seg_lens = (
                 forward_batch.extend_seq_lens
                 if forward_batch.forward_mode.is_extend()
-                else torch.ones(bs, dtype=torch.int32, device=self.device)
+                else torch.ones(bs, dtype=torch.int64, device=self.device)
             )
-            seg_indptr = torch.zeros((bs + 1,), dtype=torch.int32, device=self.device)
+            seg_indptr = torch.zeros((bs + 1,), dtype=torch.int64, device=self.device)
             seg_indptr[1:] = torch.cumsum(seg_lens, dim=0)
 
             batch_info = LoRABatchInfo(
@@ -256,7 +256,7 @@ class AscendLoRABackend(BaseLoRABackend):
                     (bs,), dtype=torch.int32, device=self.device
                 ),
                 lora_ranks=torch.empty(
-                    (self.max_loras_per_batch,), dtype=torch.int32, device=self.device
+                    (self.max_loras_per_batch,), dtype=torch.int64, device=self.device
                 ),
                 scalings=torch.empty(
                     (self.max_loras_per_batch,), dtype=torch.float16, device=self.device
