@@ -681,6 +681,8 @@ class Glm4MoeDecoderLayer(nn.Module):
         attention_bias = config.attention_bias
         self.layer_id = layer_id
 
+        use_qk_norm = config.use_qk_norm if hasattr(config, "use_qk_norm") else False
+
         self.self_attn = Glm4MoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -695,7 +697,7 @@ class Glm4MoeDecoderLayer(nn.Module):
             attention_bias=attention_bias,
             quant_config=quant_config,
             prefix=add_prefix("self_attn", prefix),
-            use_qk_norm=config.use_qk_norm,
+            use_qk_norm=use_qk_norm,
             alt_stream=alt_stream,
         )
 

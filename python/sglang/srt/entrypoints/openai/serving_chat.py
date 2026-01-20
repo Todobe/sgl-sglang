@@ -391,6 +391,7 @@ class OpenAIServingChat(OpenAIServingBase):
                         if request.chat_template_kwargs
                         else {}
                     ),
+                    return_dict=False,
                 )
             except Exception as e:
                 # If the first attempt fails, try transforming the tools format
@@ -413,6 +414,7 @@ class OpenAIServingChat(OpenAIServingBase):
                             if request.chat_template_kwargs
                             else {}
                         ),
+                        return_dict=False,
                     )
                 except jinja2.TemplateError as template_error:
                     # Template errors (e.g., from raise_exception in Jinja templates)
