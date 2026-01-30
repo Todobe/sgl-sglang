@@ -64,12 +64,17 @@ def forward_mha_prepare_npu(
     _, q_pe = q.split([m.qk_nope_head_dim, m.qk_rope_head_dim], dim=-1)
     kv_a, _ = latent_cache.split([m.kv_lora_rank, m.qk_rope_head_dim], dim=-1)
     latent_cache = latent_cache.unsqueeze(1)
-
-    if m.use_deepseek_yarn_rope:
+    is_longcat = True
+    if m.use_deepseek_yarn_rope or is_longcat:
         B, S = q.shape[0], 1
-        cos, sin = m.rotary_emb.get_cos_sin_cache(
-            positions, hidden_states.dtype, offsets=None
-        )
+        if is_longcat:
+            cos, sin = m.rotary_emb.update_and_get_cos_sin_cache(
+                positions, m.layer_id, hidden_states.dtype, offsets=None
+            )
+        else:
+            cos, sin = m.rotary_emb.get_cos_sin_cache(
+                positions, hidden_states.dtype, offsets=None
+            )
         q_pe = torch_npu.npu_interleave_rope(
             q_pe.reshape(B, -1, S, m.qk_rope_head_dim),
             cos,
@@ -204,6 +209,9 @@ def forward_mla_prepare_npu(
         if nsa_use_prefill_cp(forward_batch, m.nsa_enable_prefill_cp):
             positions = cp_split_and_rebuild_position(forward_batch, positions)
 
+        m.rotary_emb.update_and_get_cos_sin_cache(
+            positions, m.layer_id, hidden_states.dtype, offsets=None
+        )
         q_pe, k_pe = m.rotary_emb(positions, q_pe, k_pe)
 
         if nsa_use_prefill_cp(forward_batch, m.nsa_enable_prefill_cp):
@@ -262,8 +270,15 @@ def forward_mla_core_npu(
         device=attn_output.device,
     )
 
-    attn_output = attn_output.contiguous()
-    torch.ops.npu.batch_matmul_transpose(attn_output, m.w_vc, attn_bmm_output)
+    # attn_output = attn_output.contiguous()
+    # torch.ops.npu.batch_matmul_transpose(attn_output, m.w_vc, attn_bmm_output)
+    torch.bmm(
+        attn_output.transpose(0, 1),
+        m.w_vc,
+        out=attn_bmm_output.view(-1, m.num_local_heads, m.v_head_dim).transpose(
+            0, 1
+        ),
+    )
 
     attn_bmm_output = attn_bmm_output.reshape(-1, m.num_local_heads * m.v_head_dim)
     output, _ = m.o_proj(attn_bmm_output)

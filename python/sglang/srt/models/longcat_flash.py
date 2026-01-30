@@ -119,6 +119,8 @@ elif _is_hip:
     from sglang.srt.layers.quantization.awq_triton import (
         awq_dequantize_triton as awq_dequantize,
     )
+elif _is_npu:
+    from sgl_kernel_npu.moe.zero_experts_compute_identity import zero_experts_compute_identity_triton
 else:
     pass
 
@@ -271,13 +273,22 @@ class LongcatFlashMoE(nn.Module):
             router_logits,
         )
         if self.zero_expert_type is not None:
-            zero_expert_result = zero_experts_compute_triton(
-                expert_indices=topk_idx,
-                expert_scales=topk_weights,
-                num_experts=self.num_experts,
-                zero_expert_type=self.zero_expert_type,
-                hidden_states=hidden_states,
-            )
+            if not _is_npu:
+                zero_expert_result = zero_experts_compute_triton(
+                    expert_indices=topk_idx,
+                    expert_scales=topk_weights,
+                    num_experts=self.num_experts,
+                    zero_expert_type=self.zero_expert_type,
+                    hidden_states=hidden_states,
+                )
+            else:
+                zero_expert_result = zero_experts_compute_identity_triton(
+                    expert_indices=topk_idx,
+                    expert_scales=topk_weights,
+                    num_experts=self.num_experts,
+                    zero_expert_type=self.zero_expert_type,
+                    hidden_states=hidden_states,
+                )
         topk_output = StandardTopKOutput(topk_weights, topk_idx, _)
 
         final_hidden_states = self.experts(hidden_states, topk_output)
@@ -506,7 +517,7 @@ class LongcatFlashModel(nn.Module):
             use_attn_tp_group=is_dp_attention_enabled(),
         )
 
-        self.alt_stream = torch.cuda.Stream()
+        self.alt_stream = torch.get_device_module().Stream()
         self.layers = nn.ModuleList(
             [
                 LongcatFlashDecoderLayer(
@@ -1035,8 +1046,8 @@ class LongcatFlashForCausalLM(nn.Module):
         del self.lm_head.weight
         self.model.embed_tokens.weight = embed
         self.lm_head.weight = head
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        torch.get_device_module().empty_cache()
+        torch.get_device_module().synchronize()
 
     @classmethod
     def get_model_config_for_expert_location(cls, config):

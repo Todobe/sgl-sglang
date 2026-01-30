@@ -1206,7 +1206,7 @@ class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
                 scaling_factor = rope_scaling["factor"]
                 mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
                 self.scaling = self.scaling * mscale * mscale
-            else:
+            elif not _is_npu:
                 self.rotary_emb.forward = self.rotary_emb.forward_native
         else:
             self.rotary_emb = None
