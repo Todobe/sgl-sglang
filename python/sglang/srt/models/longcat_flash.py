@@ -49,6 +49,7 @@ from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.communicator import LayerCommunicator, LayerScatterModes
 from sglang.srt.layers.dp_attention import (
     dp_scatter,
+    get_attention_tp_group,
     get_attention_tp_rank,
     get_attention_tp_size,
     get_local_dp_buffer,
@@ -61,6 +62,7 @@ from sglang.srt.layers.linear import (
     RowParallelLinear,
 )
 from sglang.srt.layers.logits_processor import LogitsProcessor
+from sglang.srt.layers.moe import get_moe_a2a_backend
 from sglang.srt.layers.moe.ep_moe.kernels import zero_experts_compute_triton
 from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE, get_moe_impl_class
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
@@ -284,22 +286,27 @@ class LongcatFlashMoE(nn.Module):
                     hidden_states=hidden_states,
                 )
             else:
+                identity_mask_value = -1 if get_moe_a2a_backend().is_deepep() else 0
                 zero_expert_result = zero_experts_compute_identity_triton(
                     expert_indices=topk_idx,
                     expert_scales=topk_weights,
                     num_experts=self.num_experts,
                     zero_expert_type=self.zero_expert_type,
                     hidden_states=hidden_states,
+                    identity_mask_value=identity_mask_value,
                 )
         topk_output = StandardTopKOutput(topk_weights, topk_idx, _)
 
         final_hidden_states = self.experts(hidden_states, topk_output)
         final_hidden_states *= self.routed_scaling_factor
 
+        if self.tp_size > 1 and get_moe_a2a_backend().is_deepep():
+            zero_expert_result *= self.tp_size
+
         if self.zero_expert_type is not None and hidden_states.shape[0] > 0:
             final_hidden_states += zero_expert_result.to(final_hidden_states.device)
 
-        if self.tp_size > 1:
+        if self.tp_size > 1 and not get_moe_a2a_backend().is_deepep():
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(num_tokens, hidden_dim)
@@ -330,6 +337,8 @@ class LongcatFlashDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         self.layer_id = layer_id
         self.alt_stream = alt_stream
+        self.is_last_layer = layer_id == config.num_hidden_layers - 1
+        self.is_first_layer = layer_id == 0
         self.self_attn = nn.ModuleList(
             [
                 DeepseekV2AttentionMLA(
@@ -391,6 +400,7 @@ class LongcatFlashDecoderLayer(nn.Module):
 
         self.attn_tp_size = get_attention_tp_size()
         self.attn_tp_rank = get_attention_tp_rank()
+        self.attn_tp_group = get_attention_tp_group()
 
         self.mlp_layer_scatter_modes = [
             LayerScatterModes.init_new(
@@ -437,6 +447,8 @@ class LongcatFlashDecoderLayer(nn.Module):
         zero_allocator: BumpAllocator,
     ) -> torch.Tensor:
         # first_attn
+        if get_moe_a2a_backend().is_deepep() and not self.is_first_layer:
+            residual = residual.tensor_split(self.attn_tp_size)[self.attn_tp_rank]
         hidden_states, residual = self.moe_layer_communicator.prepare_attn(
             hidden_states, residual, forward_batch
         )
@@ -447,21 +459,30 @@ class LongcatFlashDecoderLayer(nn.Module):
                 forward_batch=forward_batch,
                 zero_allocator=zero_allocator,
             )
+        if get_moe_a2a_backend().is_deepep() and not self.is_first_layer:
+            mlp_residual = self.attn_tp_group.all_gather(residual.contiguous(), dim=0)
+            if not get_moe_a2a_backend().is_deepep():
+                residual = mlp_residual.clone()
+        else:
+            mlp_residual = residual.clone()
+        mlp_hidden_states = hidden_states.clone()
 
         # moe
-        hidden_states, residual = self.moe_layer_communicator.prepare_mlp(
+        hidden_states, moe_residual = self.moe_layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
-        moe_hidden_states = hidden_states.clone()
-        moe_residual = residual.clone()
-        moe_hidden_states = self.mlp(moe_hidden_states)
+        moe_hidden_states = self.mlp(hidden_states)
         moe_hidden_states, moe_residual = self.moe_layer_communicator.postprocess_layer(
             moe_hidden_states, moe_residual, forward_batch
         )
 
         hidden_states, residual = self.forward_mlp(
-            hidden_states, positions, residual, forward_batch, zero_allocator
+            mlp_hidden_states, positions, mlp_residual, forward_batch, zero_allocator
         )
+        if not self.is_last_layer and get_moe_a2a_backend().is_deepep():
+            hidden_states = hidden_states.tensor_split(self.attn_tp_size)[
+                self.attn_tp_rank
+            ]
 
         hidden_states = moe_hidden_states + hidden_states
         return hidden_states, residual
@@ -470,6 +491,9 @@ class LongcatFlashDecoderLayer(nn.Module):
         self, hidden_states, positions, residual, forward_batch, zero_allocator
     ):
         # first_mlp
+        hidden_states, residual = self.mlp_layer_communicator[0].prepare_mlp(
+            hidden_states, residual, forward_batch
+        )
         hidden_states = self.mlps[0](hidden_states)
         # TP all_reduce
         hidden_states = tensor_model_parallel_all_reduce(hidden_states)
