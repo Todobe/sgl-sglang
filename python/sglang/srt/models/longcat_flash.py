@@ -266,7 +266,7 @@ class LongcatFlashMoE(nn.Module):
             prefix=add_prefix("experts", prefix),
         )
 
-    def forward(self, hidden_states: torch.Tensor, forward_batch) -> torch.Tensor: #TODO:有必要吗
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -471,7 +471,7 @@ class LongcatFlashDecoderLayer(nn.Module):
         hidden_states, moe_residual = self.moe_layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
-        moe_hidden_states = self.mlp(hidden_states, forward_batch)
+        moe_hidden_states = self.mlp(hidden_states)
         moe_hidden_states, moe_residual = self.moe_layer_communicator.postprocess_layer(
             moe_hidden_states, moe_residual, forward_batch
         )
