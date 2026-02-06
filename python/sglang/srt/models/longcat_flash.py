@@ -105,6 +105,7 @@ from sglang.srt.utils import (
     is_hip,
     is_npu,
 )
+from sglang.srt.utils.multi_stream_utils import MultiStreamUtils
 
 _is_hip = is_hip()
 _is_cuda = is_cuda()
@@ -446,6 +447,8 @@ class LongcatFlashDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         zero_allocator: BumpAllocator,
     ) -> torch.Tensor:
+        if get_global_server_args().enable_longcat_double_stream and MultiStreamUtils().main_stream is None and not forward_batch.forward_mode.is_prefill():
+            MultiStreamUtils().main_stream = torch.npu.current_stream()
         # first_attn
         if get_moe_a2a_backend().is_deepep() and not self.is_first_layer:
             residual = residual.tensor_split(self.attn_tp_size)[self.attn_tp_rank]
@@ -468,21 +471,51 @@ class LongcatFlashDecoderLayer(nn.Module):
         mlp_hidden_states = hidden_states.clone()
 
         # moe
-        hidden_states, moe_residual = self.moe_layer_communicator.prepare_mlp(
-            hidden_states, residual, forward_batch
-        )
-        moe_hidden_states = self.mlp(hidden_states)
-        moe_hidden_states, moe_residual = self.moe_layer_communicator.postprocess_layer(
-            moe_hidden_states, moe_residual, forward_batch
-        )
+        if get_global_server_args().enable_longcat_double_stream and not forward_batch.forward_mode.is_prefill():
+            MultiStreamUtils().first_attn_finished.record()
+            # moe
+            moe_hidden_states = None
+            def forward_moe_func():
+                nonlocal moe_hidden_states, hidden_states
+                with torch.npu.stream(MultiStreamUtils().stream_8):
+                    MultiStreamUtils().first_attn_finished.wait()
+                    hidden_states, moe_residual = self.moe_layer_communicator.prepare_mlp(
+                        hidden_states, residual, forward_batch
+                    )
+                    moe_hidden_states = self.mlp(hidden_states)
+                    moe_hidden_states, moe_residual = self.moe_layer_communicator.postprocess_layer(
+                        moe_hidden_states, moe_residual, forward_batch
+                    )
+                MultiStreamUtils().forward_moe_func = None
+            MultiStreamUtils().forward_moe_func = forward_moe_func
+            with torch.npu.stream(MultiStreamUtils().stream_16):
+                MultiStreamUtils().first_attn_finished.wait()
+                hidden_states, residual = self.forward_mlp(
+                    mlp_hidden_states, positions, mlp_residual, forward_batch, zero_allocator
+                )
+                if not self.is_last_layer and get_moe_a2a_backend().is_deepep():
+                    hidden_states = hidden_states.tensor_split(self.attn_tp_size)[
+                        self.attn_tp_rank
+                    ]
+            MultiStreamUtils().main_stream.wait_stream(MultiStreamUtils().stream_8)
+            MultiStreamUtils().main_stream.wait_stream(MultiStreamUtils().stream_16)
+        else:
+            # moe
+            hidden_states, moe_residual = self.moe_layer_communicator.prepare_mlp(
+                hidden_states, residual, forward_batch
+            )
+            moe_hidden_states = self.mlp(hidden_states)
+            moe_hidden_states, moe_residual = self.moe_layer_communicator.postprocess_layer(
+                moe_hidden_states, moe_residual, forward_batch
+            )
 
-        hidden_states, residual = self.forward_mlp(
-            mlp_hidden_states, positions, mlp_residual, forward_batch, zero_allocator
-        )
-        if not self.is_last_layer and get_moe_a2a_backend().is_deepep():
-            hidden_states = hidden_states.tensor_split(self.attn_tp_size)[
-                self.attn_tp_rank
-            ]
+            hidden_states, residual = self.forward_mlp(
+                mlp_hidden_states, positions, mlp_residual, forward_batch, zero_allocator
+            )
+            if not self.is_last_layer and get_moe_a2a_backend().is_deepep():
+                hidden_states = hidden_states.tensor_split(self.attn_tp_size)[
+                    self.attn_tp_rank
+                ]
 
         hidden_states = moe_hidden_states + hidden_states
         return hidden_states, residual
@@ -515,6 +548,8 @@ class LongcatFlashDecoderLayer(nn.Module):
                 forward_batch=forward_batch,
                 zero_allocator=zero_allocator,
             )
+        elif get_global_server_args().enable_longcat_double_stream and not forward_batch.forward_mode.is_prefill():
+            MultiStreamUtils().forward_moe_func()
 
         # second_mlp
         hidden_states, residual = self.mlp_layer_communicator[1].prepare_mlp(
