@@ -629,6 +629,7 @@ class ServerArgs:
     nsa_prefill_cp_mode: str = "in-seq-split"
     enable_fused_qk_norm_rope: bool = False
     enable_precise_embedding_interpolation: bool = False
+    enable_longcat_double_stream: bool = False
 
     # Dynamic batch tokenizer
     enable_dynamic_batch_tokenizer: bool = False
@@ -4566,6 +4567,11 @@ class ServerArgs:
             "--enable-precise-embedding-interpolation",
             action="store_true",
             help="Enable corner alignment for resize of embeddings grid to ensure more accurate(but slower) evaluation of interpolated embedding values.",
+        )
+        parser.add_argument(
+            "--enable-longcat-double-stream",
+            action="store_true",
+            help="Enable double stream mode for longcat.",
         )
 
         # Dynamic batch tokenizer

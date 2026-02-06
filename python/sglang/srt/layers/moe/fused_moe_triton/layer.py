@@ -13,6 +13,7 @@ from sglang.srt.compilation.piecewise_context_manager import (
     is_in_piecewise_cuda_graph,
 )
 from sglang.srt.distributed import (
+    get_double_stream_ep_group,
     get_moe_expert_parallel_rank,
     get_moe_expert_parallel_world_size,
     get_moe_tensor_parallel_rank,
@@ -97,8 +98,12 @@ def create_moe_dispatcher(moe_runner_config: MoeRunnerConfig) -> BaseDispatcher:
     if a2a_backend.is_none():
         return StandardDispatcher(moe_runner_config)
     elif a2a_backend.is_deepep() or a2a_backend.is_mooncake():
+        if get_global_server_args().enable_longcat_double_stream:
+            group = get_double_stream_ep_group().device_group
+        else:
+            group=get_tp_group().device_group
         return MaybeTboDeepEPDispatcher(
-            group=get_tp_group().device_group,
+            group=group,
             router_topk=moe_runner_config.top_k,
             permute_fusion=True,
             num_experts=moe_runner_config.num_experts,
