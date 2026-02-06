@@ -751,6 +751,9 @@ class ServerArgs:
         self._handle_expert_distribution_metrics()
         self._handle_elastic_ep()
 
+        # Handle longcat double stream
+        self._handle_longcat_double_stream()
+
         # Handle pipeline parallelism.
         self._handle_pipeline_parallelism()
 
@@ -2153,6 +2156,16 @@ class ServerArgs:
                 self.expert_distribution_recorder_buffer_size = x
             elif self.expert_distribution_recorder_mode is not None:
                 self.expert_distribution_recorder_buffer_size = 1000
+
+    def _handle_longcat_double_stream(self):
+        if self.enable_longcat_double_stream:
+            if self.disaggregation_mode == 'prefill':
+                raise RuntimeError(
+                    "--enable-longcat-double-stream is not supported in prefill disaggregation mode, only available in decode and hybrid modes."
+                )
+            if self.moe_a2a_backend != "deepep":
+                self.enable_longcat_double_stream = False
+                logger.warning("Use --enable-longcat-double-stream when deepep moe is enabled.")    
 
     def _handle_pipeline_parallelism(self):
         if self.pp_size > 1:
