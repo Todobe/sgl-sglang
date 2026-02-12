@@ -167,6 +167,7 @@ class LongcatFlashDenseDecoderLayer(nn.Module):
             layer_scatter_modes=self.layer_scatter_modes,
             input_layernorm=self.input_layernorm,
             post_attention_layernorm=self.post_attention_layernorm,
+            qkv_latent_func=self.self_attn.prepare_qkv_latent,
         )
 
     def forward(
@@ -291,7 +292,7 @@ class LongcatFlashForCausalLMNextN(LongcatFlashForCausalLM):
         self.config = config
         self.quant_config = (
             None
-            if "mtp" in getattr(config, "disable_quant_module", [])
+            if "mtp" in getattr(config, "disable_quant_module", []) or _is_npu
             else quant_config
         )
         self.model = LongcatFlashModelNextN(config, self.quant_config)
