@@ -159,7 +159,24 @@ def forward_mla_prepare_npu(
                 m.qk_rope_head_dim,
                 m.quant_config,
             )
-        (
+        #TO DO: add a switch 
+        if True:
+            (
+                q_pe,
+                k_pe,
+                q_nope_out,
+                k_nope,
+                q_lora,
+                forward_batch,
+                positions,
+                dynamic_scale,
+            ) = m.mla_preprocess.forward(
+                positions, hidden_states, forward_batch, zero_allocator
+            )
+
+            topk_indices = None
+        else:
+            (
             q_pe,
             k_pe,
             q_nope_out,
@@ -167,10 +184,10 @@ def forward_mla_prepare_npu(
             forward_batch,
             zero_allocator,
             positions,
-        ) = m.mla_preprocess.forward(
+            ) = m.mla_preprocess.forward(
             positions, hidden_states, forward_batch, zero_allocator
-        )
-        topk_indices = None
+            )
+            topk_indices = None
     else:
         q_lora = None
         if m.q_lora_rank is not None:

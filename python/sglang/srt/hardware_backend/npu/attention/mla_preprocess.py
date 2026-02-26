@@ -1,7 +1,8 @@
 import re
 from functools import lru_cache
 from typing import TYPE_CHECKING, Optional
-
+import numpy as np
+import custom_ops
 import torch
 import torch.nn.functional as F
 
@@ -98,6 +99,7 @@ class NPUFusedMLAPreprocess(torch.nn.Module):
         self.q_b_proj_weight_scale = self.q_b_proj.weight_scale.view(1, -1).to(
             torch.float
         )
+
 
     def preprocess_weights(self, hidden_states):
         self.dummy = torch.zeros(
@@ -237,13 +239,20 @@ class NPUFusedMLAPreprocess(torch.nn.Module):
         )
 
     def mlaprolog_preprocess_weight(self):
-        self.qkv_a_proj.weight.data = self.qkv_a_proj.weight.data.transpose(0, 1)
+        #self.qkv_a_proj.weight.data = self.qkv_a_proj.weight.data.transpose(0, 1)
         qkv_a_proj_weight_q = self.qkv_a_proj.weight.data[:, : self.q_lora_rank].clone()
         qkv_a_proj_weight_kv = self.qkv_a_proj.weight.data[
             :, self.q_lora_rank :
         ].clone()
         self.q_a_proj_weight = npu_format_cast(qkv_a_proj_weight_q)
+        # print("!!!!!!!!!!!!!!!1111111", self.qkv_a_proj.weight_scale.shape)
+        self.q_a_proj_weight_scale = self.qkv_a_proj.weight_scale[ : self.q_lora_rank].view(1, -1).to(
+            torch.float
+        )
         self.kv_a_proj_weight = npu_format_cast(qkv_a_proj_weight_kv)
+        self.kv_a_proj_weight_scale = self.qkv_a_proj.weight_scale[self.q_lora_rank:].view(1, -1).to(
+            torch.float
+        )
 
     def get_sin_cos(self, positions):
         cos_sin = self.rotary_emb.cos_sin_cache[positions]
@@ -420,8 +429,26 @@ class NPUFusedMLAPreprocess(torch.nn.Module):
             self.has_preprocess_weights = True
         self.cos, self.sin = self.get_sin_cos(positions)
         k_cache, v_cache, slot_mapping = self.get_kv_cache_and_cache_idx(forward_batch)
+
+        def calculate_per_token_scale(hidden_states_bf16):
+
+            T, hidden_dim = hidden_states_bf16.shape
+            hidden_2d = hidden_states_bf16.view(-1, hidden_dim)
+            
+            abs_max = torch.max(torch.abs(hidden_2d), dim=-1, keepdim=True)[0]
+            
+            scales = abs_max / 127.0
+            scales = torch.where(scales == 0, torch.ones_like(scales), scales)
+            
+            return scales
+
+        scales = calculate_per_token_scale(hidden_states)
+        scales_2d = scales.view(-1,1).to(torch.float).to("npu")
+    
+        hidden_states_new = torch.round(hidden_states / scales_2d).clamp(-128, 127).to(torch.int8)
+
         mla_prolog_input_args = {
-            "token_x": hidden_states,
+            "token_x": hidden_states_new,
             "weight_dq": self.q_a_proj_weight,
             "weight_uq_qr": self.q_b_proj.weight,
             "weight_uk": self.w_kc,
@@ -433,12 +460,15 @@ class NPUFusedMLAPreprocess(torch.nn.Module):
             "kv_cache": k_cache,
             "kr_cache": v_cache,
             "cache_index": slot_mapping.to(dtype=torch.int64),
+            "dequant_scale_x": scales_2d,
+            "dequant_scale_w_dq": self.q_a_proj_weight_scale,
+            "dequant_scale_w_dkv_kr":self.kv_a_proj_weight_scale,
             "dequant_scale_w_uq_qr": self.q_b_proj_weight_scale,
             "rmsnorm_epsilon_cq": self.q_a_layernorm.variance_epsilon,
             "rmsnorm_epsilon_ckv": self.kv_a_layernorm.variance_epsilon,
             "cache_mode": "PA_BSND",
             "query_norm_flag": True,
-            "weight_quant_mode": 1,  # 0:no quant; 1:uq_qr: quant; 2: weight_dq,weight_uq_qr,weight_dkv_kr: quant
+            "weight_quant_mode": 2,  # 0:no quant; 1:uq_qr: quant; 2: weight_dq,weight_uq_qr,weight_dkv_kr: quant
         }
         q_nope, q_pe, dequant_scale_q_nope, qr, dequant_q_norm = (
             torch.ops.custom.npu_mla_prolog_v3(**mla_prolog_input_args)
@@ -466,11 +496,12 @@ class NPUFusedMLAPreprocess(torch.nn.Module):
         _is_mlaprolog = hasattr(self.quant_config, "ignore") and any(
             re.fullmatch(r".*kv_b_proj", l) for l in self.quant_config.ignore
         )
-        if _is_w8a8:
-            return self.forward_mlapo(
-                positions, hidden_states, forward_batch, zero_allocator
-            )
-        elif _is_mlaprolog:
+        # if _is_w8a8:
+        #     return self.forward_mlapo(
+        #         positions, hidden_states, forward_batch, zero_allocator
+        #     )
+        #TO DO add a switch
+        if True:
             return self.forward_mlaprolog(positions, hidden_states, forward_batch)
         else:
             return self.forward_absorb_prepare_npu_rms_norm_cache(
