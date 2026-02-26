@@ -35,6 +35,7 @@ from sglang.srt.layers.quantization.fp8_kernel import is_fp8_fnuz
 from sglang.srt.layers.quantization.quark.quark_moe import QuarkW4A4MXFp4MoEMethod
 from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config, W4AFp8MoEMethod
 from sglang.srt.utils import get_bool_env_var, is_hip, is_npu
+from sglang.srt.hardware_backend.npu.quantization.fused_moe_method_npu import npu_apply_without_routing_weights_fp8
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (
@@ -375,6 +376,15 @@ class DeepEPMoE(FusedMoE):
                 hidden_states = npu_fused_moe_without_routing_weights_bf16(
                     self, hidden_states, group_list_type, group_list, output_dtype
                 )
+            elif self.use_fp8_w8a8:
+                hidden_states = npu_apply_without_routing_weights_fp8(
+                    self,
+                    hidden_states,
+                    hidden_states_scale,
+                    group_list_type,
+                    group_list,
+                    output_dtype,
+                )
             else:
                 input_quant = get_bool_env_var("DEEP_NORMAL_MODE_USE_INT8_QUANT")
                 if not input_quant and not isinstance(
@@ -408,6 +418,15 @@ class DeepEPMoE(FusedMoE):
             if self.w13_weight.dtype == torch.bfloat16:
                 hidden_states = npu_fused_moe_without_routing_weights_bf16(
                     self, hidden_states, group_list_type, group_list, output_dtype
+                )
+            elif self.use_fp8_w8a8:
+                hidden_states = npu_apply_without_routing_weights_fp8(
+                    self,
+                    hidden_states,
+                    hidden_states_scale,
+                    group_list_type,
+                    group_list,
+                    output_dtype,
                 )
             else:
                 hidden_states = self.quant_method.apply_without_routing_weights(

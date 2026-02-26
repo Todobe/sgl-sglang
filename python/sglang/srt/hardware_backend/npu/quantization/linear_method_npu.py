@@ -1,12 +1,43 @@
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, List
 
 import torch
 
 from sglang.srt.hardware_backend.npu.utils import npu_format_cast
 from sglang.srt.layers.quantization.base_config import LinearMethodBase
+from sglang.srt.utils import is_npu, is_npu_before_atlas_a5
 
 if TYPE_CHECKING:
     from sglang.srt.layers.quantization.base_config import QuantizationConfig
+
+_is_npu = is_npu()
+_is_npu_before_atlas_a5 = is_npu_before_atlas_a5()
+ 
+if _is_npu:
+    import sgl_kernel_npu  # noqa: F401
+    import torch_npu  # noqa: F401
+ 
+def fp8_matmul_npu(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    block_size: List[int],
+    weight_scale: torch.Tensor,
+    input_scale: Optional[torch.Tensor] = None, # if input is dynamic quant, input_scale == None
+    bias: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    if block_size != [128, 128]:
+        raise ValueError("fp8_matmul_npu only supports block_size == [128, 128]")
+ 
+    if _is_npu_before_atlas_a5:
+        while input.dim() > 2 and input.size(0) == 1:
+            input = input.squeeze(0)
+        assert input.dim() == 2
+        output = torch.ops.npu.fp8_w8a16_matmul(input, weight, weight_scale, "bf16")
+    else:
+        group_sizes = (1, 128, 128)
+        x, x_scale = torch.ops.npu.npu_dynamic_block_quant(input, dst_type=torch.float8_e4m3fn, row_block_size=1, col_block_size=128)
+        output = torch.ops.npu.npu_quant_matmul(x, weight, scale=weight_scale, pertoken_scale=x_scale, output_dtype=torch.bfloat16, group_sizes=group_sizes)
+ 
+    return output
 
 
 class _NPULinearMethodBase(LinearMethodBase):

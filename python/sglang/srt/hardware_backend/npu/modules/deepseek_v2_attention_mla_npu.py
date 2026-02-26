@@ -14,12 +14,15 @@ from sglang.srt.layers.attention.nsa.utils import (
     nsa_use_prefill_cp,
 )
 from sglang.srt.layers.communicator import get_attn_tp_context
+from sglang.srt.layers.quantization.fp8 import Fp8Config
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
     from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA
     from sglang.srt.utils import BumpAllocator
 
+from sglang.srt.utils import is_npu_before_atlas_a5
+_is_npu_before_atlas_a5 = is_npu_before_atlas_a5()
 
 # region MHA
 def forward_mha_prepare_npu(
@@ -202,7 +205,21 @@ def forward_mla_prepare_npu(
         q_nope, q_pe = q.split([m.qk_nope_head_dim, m.qk_rope_head_dim], dim=-1)
         k_pe = latent_cache[..., m.kv_lora_rank :].unsqueeze(1)
 
-        q_nope_out = torch.bmm(q_nope.transpose(0, 1), m.w_kc)
+        if isinstance(m.quant_config, Fp8Config):
+            if _is_npu_before_atlas_a5:
+                q_nope_out = torch.ops.npu.fp8_w8a16_batch_matmul(
+                    q_nope.transpose(0, 1).contiguous(), m.w_kc, m.w_scale_k, "bf16"
+                )
+            else:
+                group_sizes = (1, 128, 128)
+                q_nope_t = q_nope.transpose(0, 1)
+                b, m_, k = q_nope_t.shape
+                q_nope_t = q_nope_t.reshape(b * m_, k).contiguous()
+                q_nope_fp8, q_nope_scale = torch.ops.npu.npu_dynamic_block_quant(q_nope_t, dst_type=torch.float8_e4m3fn, row_block_size=1, col_block_size=128)
+                q_nope_fp8, q_nope_scale = q_nope_fp8.reshape(b, m_, k).contiguous(), q_nope_scale.reshape(b, m_, (k + 127) // 128).contiguous()
+                q_nope_out  = torch.ops.npu.npu_quant_matmul(q_nope_fp8, m.w_kc, scale=m.w_scale_k, pertoken_scale=q_nope_scale, output_dtype=torch.bfloat16, group_sizes=group_sizes)
+        else:
+            q_nope_out = torch.bmm(q_nope.transpose(0, 1), m.w_kc)
 
         q_nope_out = q_nope_out.transpose(0, 1)
 
@@ -264,21 +281,36 @@ def forward_mla_core_npu(
 
     attn_output = attn_output.view(-1, m.num_local_heads, m.kv_lora_rank)
 
-    attn_bmm_output = torch.empty(
-        (attn_output.shape[0], m.num_local_heads, m.v_head_dim),
-        dtype=attn_output.dtype,
-        device=attn_output.device,
-    )
-
-    # attn_output = attn_output.contiguous()
-    # torch.ops.npu.batch_matmul_transpose(attn_output, m.w_vc, attn_bmm_output)
-    torch.bmm(
-        attn_output.transpose(0, 1),
-        m.w_vc,
-        out=attn_bmm_output.view(-1, m.num_local_heads, m.v_head_dim).transpose(
-            0, 1
-        ),
-    )
+    if isinstance(m.quant_config, Fp8Config):
+        if _is_npu_before_atlas_a5:
+            attn_bmm_output = torch.ops.npu.fp8_w8a16_batch_matmul(
+                attn_output.transpose(0, 1).contiguous(), m.w_vc, m.w_scale_v, "bf16"
+            )
+            attn_bmm_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
+        else:
+            group_sizes = (1, 128, 128)
+            attn_output_t = attn_output.transpose(0, 1)
+            b, m_, k = attn_output_t.shape
+            attn_output_t = attn_output_t.reshape(b * m_, k).contiguous()
+            attn_output_fp8, attn_output_scale = torch.ops.npu.npu_dynamic_block_quant(attn_output_t, dst_type=torch.float8_e4m3fn, row_block_size=1, col_block_size=128)
+            attn_output_fp8, attn_output_scale = attn_output_fp8.reshape(b, m_, k).contiguous(), attn_output_scale.reshape(b, m_, (k + 127) // 128).contiguous()
+            attn_bmm_output  = torch.ops.npu.npu_quant_matmul(attn_output_fp8, m.w_vc, scale=m.w_scale_v, pertoken_scale=attn_output_scale, output_dtype=torch.bfloat16, group_sizes=group_sizes)
+    else:
+        attn_bmm_output = torch.empty(
+            (attn_output.shape[0], m.num_local_heads, m.v_head_dim),
+            dtype=attn_output.dtype,
+            device=attn_output.device,
+        )
+ 
+        # attn_output = attn_output.contiguous()
+        # torch.ops.npu.batch_matmul_transpose(attn_output, m.w_vc, attn_bmm_output)
+        torch.bmm(
+            attn_output.transpose(0, 1),
+            m.w_vc,
+            out=attn_bmm_output.view(-1, m.num_local_heads, m.v_head_dim).transpose(
+                0, 1
+            ),
+        )
 
     attn_bmm_output = attn_bmm_output.reshape(-1, m.num_local_heads * m.v_head_dim)
     output, _ = m.o_proj(attn_bmm_output)

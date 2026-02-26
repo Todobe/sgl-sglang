@@ -30,12 +30,14 @@ from sglang.srt.utils import (
     is_gfx95_supported,
     is_hip,
     is_npu,
+    is_npu_before_atlas_a5,
     is_nvidia_cublas_cu12_version_ge_12_9,
 )
 
 _is_hip = is_hip()
 _is_cuda = is_cuda()
 _is_npu = is_npu()
+_is_npu_before_atlas_a5 = is_npu_before_atlas_a5()
 _is_fp8_fnuz = is_fp8_fnuz()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 _is_cpu_amx_available = cpu_has_amx_support()

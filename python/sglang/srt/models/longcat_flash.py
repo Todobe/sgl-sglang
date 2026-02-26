@@ -204,6 +204,49 @@ class LongcatFlashRouter(nn.Module):
         return logits
 
 
+def compute(hidden_states: torch.Tensor,
+            zero_expert_scales: torch.Tensor):
+
+    s = zero_expert_scales.sum(dim=1, keepdim=True)
+    s = s.to(dtype=hidden_states.dtype)
+
+    return hidden_states * s
+
+def custom_mask(data, mask):
+    dtype = data.dtype
+    mask = mask.to(dtype)
+    data *= 1 - mask
+
+def custom_mask_0(data,mask):
+    dtype = data.dtype
+    mask = mask.to(dtype)
+    data *= 1 - mask
+
+def custom_mask_1(data,mask):
+    dtype = data.dtype
+    mask = mask.to(dtype)
+    data *= 1 - mask
+    data -= mask
+
+def zero_experts_compute_native_deepep(
+        expert_indices, expert_scales, num_experts, zero_expert_type, hidden_states
+    ):
+
+        if zero_expert_type == "identity":
+            zero_expert_mask = expert_indices < num_experts
+            zero_expert_scales = expert_scales.clone()
+            custom_mask(zero_expert_scales, zero_expert_mask)
+
+        normal_expert_mask = (expert_indices >= num_experts)
+        token_only_routed_to_zero_experts = normal_expert_mask.all(dim=1)
+        fake_expert_mask = torch.zeros_like(normal_expert_mask, dtype=torch.bool)
+        fake_expert_mask[:,0] = token_only_routed_to_zero_experts
+        custom_mask_1(expert_indices,normal_expert_mask)
+        custom_mask_0(expert_indices,fake_expert_mask)
+        custom_mask_0(expert_scales,normal_expert_mask)
+
+        return compute(hidden_states, zero_expert_scales)
+
 class LongcatFlashMoE(nn.Module):
 
     def __init__(
@@ -288,13 +331,20 @@ class LongcatFlashMoE(nn.Module):
                 )
             else:
                 identity_mask_value = -1 if get_moe_a2a_backend().is_deepep() else 0
-                zero_expert_result = zero_experts_compute_identity_triton(
+                # zero_expert_result = zero_experts_compute_identity_triton(
+                #     expert_indices=topk_idx,
+                #     expert_scales=topk_weights,
+                #     num_experts=self.num_experts,
+                #     zero_expert_type=self.zero_expert_type,
+                #     hidden_states=hidden_states,
+                #     identity_mask_value=identity_mask_value,
+                # )
+                zero_expert_result = zero_experts_compute_native_deepep(
                     expert_indices=topk_idx,
                     expert_scales=topk_weights,
                     num_experts=self.num_experts,
                     zero_expert_type=self.zero_expert_type,
                     hidden_states=hidden_states,
-                    identity_mask_value=identity_mask_value,
                 )
         topk_output = StandardTopKOutput(topk_weights, topk_idx, _)
 
@@ -826,9 +876,10 @@ class LongcatFlashForCausalLM(nn.Module):
                         self_attn.w_kc,
                         w_kc.transpose(1, 2).contiguous().transpose(1, 2),
                     )
-                    self_attn.w_vc = bind_or_assign(
-                        self_attn.w_vc, w_vc.contiguous().transpose(1, 2)
-                    )
+                    w_vc = w_vc.contiguous().transpose(1, 2)
+                    if _is_npu:
+                        w_vc = w_vc.contiguous()
+                    self_attn.w_vc = bind_or_assign(self_attn.w_vc, w_vc)
                     if (
                         hasattr(self_attn.kv_b_proj, "weight_scale")
                         and self_attn.w_scale is None

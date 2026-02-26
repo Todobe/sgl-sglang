@@ -29,6 +29,7 @@ from sglang.srt.layers.quantization.fp8_kernel import (
     w8a8_block_fp8_matmul_deepgemm,
     w8a8_block_fp8_matmul_triton,
 )
+from sglang.srt.hardware_backend.npu.quantization.linear_method_npu import fp8_matmul_npu
 from sglang.srt.utils import (
     ceil_align,
     ceil_div,
@@ -39,6 +40,7 @@ from sglang.srt.utils import (
     is_cuda,
     is_flashinfer_available,
     is_hip,
+    is_npu,
     is_sm90_supported,
     is_sm100_supported,
     offloader,
@@ -49,6 +51,7 @@ logger = logging.getLogger(__name__)
 _is_hip = is_hip()
 _is_cuda = is_cuda()
 _is_fp8_fnuz = is_fp8_fnuz()
+_is_npu = is_npu()
 
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
@@ -251,6 +254,8 @@ def _dispatch_auto_backend() -> Callable:
         return cutlass_w8a8_block_fp8_linear_with_fallback
     elif _use_aiter:
         return aiter_w8a8_block_fp8_linear
+    elif _is_npu:
+        return fp8_matmul_npu
     else:
         return triton_w8a8_block_fp8_linear
 

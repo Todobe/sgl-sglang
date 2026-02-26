@@ -3,11 +3,12 @@ from typing import TYPE_CHECKING
 import torch
 
 from sglang.srt.mem_cache.allocator import PagedTokenToKVPoolAllocator
-from sglang.srt.utils import get_num_new_pages, next_power_of_2
+from sglang.srt.utils import get_num_new_pages, next_power_of_2, is_npu_before_atlas_a5
 
 if TYPE_CHECKING:
     from sglang.srt.mem_cache.memory_pool import KVCache
 
+_is_npu_before_atlas_a5 = is_npu_before_atlas_a5()
 
 def _alloc_extend_naive(
     prefix_lens,
@@ -101,7 +102,7 @@ class NPUPagedTokenToKVPoolAllocator(PagedTokenToKVPoolAllocator):
         if num_new_pages_item > len(self.free_pages):
             return None
 
-        if num_new_pages_item < 200:
+        if num_new_pages_item < 200 and _is_npu_before_atlas_a5: # alloc_extend_kernel op now has bug on Atlas A5
             from sgl_kernel_npu.mem_cache.allocator import alloc_extend_kernel
 
             out_indices = torch.empty(
