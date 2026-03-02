@@ -675,31 +675,21 @@ class Qwen3LLMModel(Qwen3Model):
             # To match HF behavior, deepstack must be added AFTER residual: (hidden_states + residual) + deepstack
             # The order matters because addition with different tensors is not associative in practice.
             # Deepstack for prev_layer is applied at the start of current layer via post_residual_addition.
-            if not is_npu():
-                deepstack_embeds = self.get_deepstack_embeds(
-                    layer_idx - 1, input_deepstack_embeds
-                )
+            deepstack_embeds = self.get_deepstack_embeds(
+                layer_idx - 1, input_deepstack_embeds
+            )
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 forward_batch,
                 residual,
-                post_residual_addition=deepstack_embeds if not is_npu() else None,
+                post_residual_addition=deepstack_embeds,
             )
-
-            if (
-                is_npu()
-                and input_deepstack_embeds is not None
-                and layer_idx in self.deepstack_embed_to_decoder_layer
-            ):
-                sep = self.hidden_size * layer_idx
-                hidden_states += input_deepstack_embeds[:, sep : sep + self.hidden_size]
 
         # Handle deepstack for the last processed layer if it exists.
-        if not is_npu():
-            last_deepstack = self.get_deepstack_embeds(
-                self.end_layer - 1, input_deepstack_embeds
-            )
+        last_deepstack = self.get_deepstack_embeds(
+            self.end_layer - 1, input_deepstack_embeds
+        )
 
         if not self.pp_group.is_last_rank:
             return PPProxyTensors(
@@ -714,14 +704,13 @@ class Qwen3LLMModel(Qwen3Model):
                     hidden_states = self.norm(hidden_states)
                 else:
                     hidden_states, _ = self.norm(
-                        hidden_states, residual, post_residual_addition=last_deepstack if not is_npu() else None
+                        hidden_states, residual, post_residual_addition=last_deepstack
                     )
 
         if len(aux_hidden_states) == 0:
             return hidden_states
 
         return hidden_states, aux_hidden_states
-
 
 class Qwen3VLForConditionalGeneration(nn.Module):
     # To ensure correct weight loading and mapping.
