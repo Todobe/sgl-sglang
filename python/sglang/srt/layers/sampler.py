@@ -167,6 +167,8 @@ class Sampler(nn.Module):
                         sampling_info.top_ps,
                         sampling_info.min_ps,
                         sampling_info.need_min_p_sampling,
+                        sampling_info.sampling_seed,
+                        positions,
                     )
                 else:
                     raise ValueError(
@@ -348,6 +350,8 @@ def top_k_top_p_min_p_sampling_from_probs_ascend(
     top_ps: torch.Tensor,
     min_ps: torch.Tensor,
     need_min_p_sampling: bool,
+    sampling_seed: Optional[torch.Tensor],
+    positions: torch.Tensor,
 ):
     """A top-k, top-p and min-p sampling implementation for ascend npu with torch_npu interface."""
     # torch_npu.npu_top_k_top_p requires top_k value range in [1, 1024]
@@ -362,7 +366,12 @@ def top_k_top_p_min_p_sampling_from_probs_ascend(
             min_p_mask = probs_top_k_top_p < min_p_thresholds.view(-1, 1)
             probs_top_k_top_p.masked_fill_(min_p_mask, 0.0)
 
-        batch_next_token_ids = torch.multinomial(probs_top_k_top_p, num_samples=1)
+        if sampling_seed is not None:
+            batch_next_token_ids = multinomial_with_seed(
+                probs_top_k_top_p, sampling_seed, positions
+            )
+        else:
+            batch_next_token_ids = torch.multinomial(probs_top_k_top_p, num_samples=1)
     else:
         probs = torch.softmax(probs, dim=-1)
         probs_sort, probs_idx = probs.sort(dim=-1, descending=True)
@@ -384,7 +393,10 @@ def top_k_top_p_min_p_sampling_from_probs_ascend(
             min_p_mask = probs_sort < min_p_thresholds.view(-1, 1)
             probs_sort.masked_fill_(min_p_mask, 0.0)
 
-        sampled_index = torch.multinomial(probs_sort, num_samples=1)
+        if sampling_seed is not None:
+            sampled_index = multinomial_with_seed(probs_sort, sampling_seed, positions)
+        else:
+            sampled_index = torch.multinomial(probs_sort, num_samples=1)
         probs_idx = probs_idx.to(torch.int32)
         batch_next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
 

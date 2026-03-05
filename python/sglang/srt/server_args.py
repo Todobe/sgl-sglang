@@ -2393,6 +2393,8 @@ class ServerArgs:
                     f"Currently only {DETERMINISTIC_ATTENTION_BACKEND_CHOICES} attention backends are supported for deterministic inference, "
                     f"but you explicitly specified '{self.attention_backend}'."
                 )
+            if self.attention_backend == "ascend":
+                self.sampling_backend = "ascend"
 
             if is_deepseek_model:
                 if self.attention_backend not in ["fa3", "triton"]:

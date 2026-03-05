@@ -639,7 +639,11 @@ class AscendAttnBackend(AttentionBackend):
                             sparse_mode=3 if q_len != 1 else 0,
                             scale=layer.scaling,
                             next_tokens=0,
-                        )[0]
+                            actual_seq_lengths=torch.tensor([q_len]),
+                            actual_seq_lengths_kv=torch.tensor([q_len]),
+                        )[
+                            0
+                        ]
                     )
                     q_len_offset += q_len
                 attn_output = attn_output.view(
