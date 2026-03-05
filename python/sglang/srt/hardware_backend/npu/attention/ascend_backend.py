@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, List, Optional
 
 import torch
 import torch_npu
+import batch_invariant_ops
 
 from sglang.srt.configs.model_config import AttentionArch
 from sglang.srt.hardware_backend.npu.attention.mla_preprocess import (
@@ -628,7 +629,7 @@ class AscendAttnBackend(AttentionBackend):
                 q_len_offset = 0
                 for q_len in forward_batch.extend_seq_lens_cpu:
                     attn_output[q_len_offset : q_len_offset + q_len] = (
-                        torch.ops.npu.npu_fused_infer_attention_score(
+                        torch.ops.batch_invariant_ops.npu_fused_infer_attention_score_batch_invariant(
                             q[None, q_len_offset : q_len_offset + q_len],
                             k[None, q_len_offset : q_len_offset + q_len],
                             v[None, q_len_offset : q_len_offset + q_len],
@@ -639,7 +640,11 @@ class AscendAttnBackend(AttentionBackend):
                             sparse_mode=3 if q_len != 1 else 0,
                             scale=layer.scaling,
                             next_tokens=0,
-                        )[0]
+                            actual_seq_lengths=torch.tensor([q_len]),
+                            actual_seq_lengths_kv=torch.tensor([q_len]),
+                        )[
+                            0
+                        ]
                     )
                     q_len_offset += q_len
                 attn_output = attn_output.view(
@@ -1261,27 +1266,29 @@ class AscendAttnBackend(AttentionBackend):
                     actual_seq_len_kv = (
                         self.forward_metadata.seq_lens_cpu_int.cpu().int().tolist()
                     )
-                attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
-                    q.view(
-                        forward_batch.batch_size,
-                        -1,
-                        layer.tp_q_head_num,
-                        layer.qk_head_dim,
-                    ),
-                    k_cache.view(
-                        -1, self.page_size, layer.tp_k_head_num * layer.qk_head_dim
-                    ),
-                    v_cache.view(
-                        -1, self.page_size, layer.tp_v_head_num * layer.qk_head_dim
-                    ),
-                    num_heads=layer.tp_q_head_num,
-                    num_key_value_heads=layer.tp_k_head_num,
-                    input_layout="BSND",
-                    atten_mask=None,
-                    block_size=self.page_size,
-                    block_table=self.forward_metadata.block_tables,
-                    actual_seq_lengths_kv=actual_seq_len_kv,
-                    scale=layer.scaling,
+                attn_output, _ = (
+                    torch.ops.batch_invariant_ops.npu_fused_infer_attention_score_batch_invariant(
+                        q.view(
+                            forward_batch.batch_size,
+                            -1,
+                            layer.tp_q_head_num,
+                            layer.qk_head_dim,
+                        ),
+                        k_cache.view(
+                            -1, self.page_size, layer.tp_k_head_num * layer.qk_head_dim
+                        ),
+                        v_cache.view(
+                            -1, self.page_size, layer.tp_v_head_num * layer.qk_head_dim
+                        ),
+                        num_heads=layer.tp_q_head_num,
+                        num_key_value_heads=layer.tp_k_head_num,
+                        input_layout="BSND",
+                        atten_mask=None,
+                        block_size=self.page_size,
+                        block_table=self.forward_metadata.block_tables,
+                        actual_seq_lengths_kv=actual_seq_len_kv,
+                        scale=layer.scaling,
+                    )
                 )
             else:
                 query = q.reshape(-1, layer.tp_q_head_num, layer.qk_head_dim)

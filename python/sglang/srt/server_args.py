@@ -145,7 +145,7 @@ ENCODER_TRANSFER_BACKEND_CHOICES = ["zmq_to_scheduler", "zmq_to_tokenizer", "moo
 
 GRAMMAR_BACKEND_CHOICES = ["xgrammar", "outlines", "llguidance", "none"]
 
-DETERMINISTIC_ATTENTION_BACKEND_CHOICES = ["flashinfer", "fa3", "triton"]
+DETERMINISTIC_ATTENTION_BACKEND_CHOICES = ["flashinfer", "fa3", "triton", "ascend"]
 
 RADIX_SUPPORTED_DETERMINISTIC_ATTENTION_BACKEND = ["fa3", "triton"]
 
@@ -2393,6 +2393,8 @@ class ServerArgs:
                     f"Currently only {DETERMINISTIC_ATTENTION_BACKEND_CHOICES} attention backends are supported for deterministic inference, "
                     f"but you explicitly specified '{self.attention_backend}'."
                 )
+            if self.attention_backend == "ascend":
+                self.sampling_backend = "ascend"
 
             if is_deepseek_model:
                 if self.attention_backend not in ["fa3", "triton"]:
