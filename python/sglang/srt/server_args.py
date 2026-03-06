@@ -2350,7 +2350,7 @@ class ServerArgs:
 
         if self.enable_deterministic_inference:
             # Check sampling backend
-            self.sampling_backend = "pytorch"
+            self.sampling_backend = "pytorch" if self.sampling_backend != "ascend" else "ascend"
             logger.warning(
                 "Sampling backend is set to pytorch for deterministic inference."
             )
