@@ -138,6 +138,13 @@ class RMSNorm(MultiPlatformOp):
         residual: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if is_batch_invariant_mode_enabled():
+            if (
+                residual is not None
+                or get_global_server_args().rl_on_policy_target == "fsdp"
+            ):
+                return self.forward_native(x, residual, **kwargs)
+                # todo: use invariant ops when residual is None
         if residual is not None:
             out, _, residual_out = torch_npu.npu_add_rms_norm(
                 residual, x, self.weight.data, self.variance_epsilon
