@@ -985,105 +985,179 @@ class AscendAttnBackend(AttentionBackend):
                         -1, layer.tp_q_head_num * layer.v_head_dim
                     )
         elif sum(forward_batch.extend_prefix_lens_cpu) > 0:
-            num_token_padding = q.shape[0]
-            q, k, v = [
-                data[: forward_batch.num_token_non_padded_cpu] for data in [q, k, v]
-            ]
-            q_nope, q_rope = q.split([layer.v_head_dim, self.qk_rope_head_dim], dim=-1)
-            k_nope, k_rope = k.split([layer.v_head_dim, self.qk_rope_head_dim], dim=-1)
+            if layer.qk_head_dim == layer.v_head_dim:
+                q = q.reshape(-1, layer.tp_q_head_num, layer.qk_head_dim)
 
-            # 1st, compute extend tokens to get attn_output and attn_lse
-            num_tokens = q_nope.size(0)
-            attn_output = torch.zeros(
-                num_tokens,
-                layer.tp_q_head_num,
-                layer.v_head_dim,
-                dtype=q_nope.dtype,
-                device=q_nope.device,
-            )
-            attn_lse = torch.zeros(
-                layer.tp_q_head_num,
-                num_tokens,
-                dtype=torch.float32,
-                device=q_nope.device,
-            )
-            torch_npu.atb.npu_ring_mla(
-                q_nope=q_nope,
-                q_rope=q_rope,
-                k_nope=k_nope,
-                k_rope=k_rope,
-                value=v,
-                mask=self.ringmla_mask,
-                seqlen=self.forward_metadata.extend_seq_lens_cpu_int,
-                head_num=layer.tp_q_head_num,
-                kv_head_num=layer.tp_k_head_num,
-                pre_out=None,
-                prev_lse=None,
-                qk_scale=layer.scaling,
-                kernel_type="kernel_type_high_precision",
-                mask_type="mask_type_triu",
-                calc_type="calc_type_first_ring",
-                output=attn_output,
-                softmax_lse=attn_lse,
-            )
+                k_buffer = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
+                v_buffer = forward_batch.token_to_kv_pool.get_value_buffer(
+                    layer.layer_id
+                )
+                kv_cached = torch.index_select(
+                    k_buffer, 0, self.forward_metadata.flatten_prefix_block_tables
+                )
+                k_rope_cached = torch.index_select(
+                    v_buffer, 0, self.forward_metadata.flatten_prefix_block_tables
+                ).flatten(0, 1)
 
-            # 2nd, load history kvcache(kv_a and k_pe) and calculate k_nope
-            k_buffer = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
-            v_buffer = forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id)
-            kv_cached = torch.index_select(
-                k_buffer, 0, self.forward_metadata.flatten_prefix_block_tables
-            )
-            k_rope_cached = torch.index_select(
-                v_buffer, 0, self.forward_metadata.flatten_prefix_block_tables
-            ).flatten(0, 1)
+                assert layer.kv_b_proj is not None
+                kv = layer.kv_b_proj(kv_cached)[0].view(
+                    -1, layer.tp_k_head_num, self.qk_nope_head_dim + layer.v_head_dim
+                )
+                k_nope, v_pre = kv.split(
+                    [self.qk_nope_head_dim, layer.v_head_dim], dim=-1
+                )
 
-            assert layer.kv_b_proj is not None
-            kv = layer.kv_b_proj(kv_cached)[0].view(
-                -1, layer.tp_k_head_num, self.qk_nope_head_dim + layer.v_head_dim
-            )
-            k_nope, v = kv.split([self.qk_nope_head_dim, layer.v_head_dim], dim=-1)
+                k_rope = k_rope_cached.expand(-1, layer.tp_k_head_num, -1)
+                k_pre = torch.cat([k_nope, k_rope], dim=-1)
 
-            # 3rd, compute history kv to attn_out
-            k_rope = k_rope_cached.expand(-1, layer.tp_k_head_num, -1)
-            seq_len = torch.stack(
-                [
+                attn_output = torch.empty(
+                    (q.size(0), layer.tp_q_head_num, layer.v_head_dim),
+                    device=q.device,
+                    dtype=q.dtype,
+                )
+                q_len_offset = 0
+                prefix_len_offset = 0
+                for q_len, prefix_len in zip(
                     self.forward_metadata.extend_seq_lens_cpu_int,
                     self.forward_metadata.prefix_lens,
-                ]
-            )
-            torch_npu.atb.npu_ring_mla(
-                q_nope=q_nope,
-                q_rope=q_rope,
-                k_nope=k_nope,
-                k_rope=k_rope,
-                value=v,
-                mask=self.ringmla_mask,
-                seqlen=seq_len,
-                head_num=layer.tp_q_head_num,
-                kv_head_num=layer.tp_k_head_num,
-                pre_out=attn_output,
-                prev_lse=attn_lse,
-                qk_scale=layer.scaling,
-                kernel_type="kernel_type_high_precision",
-                mask_type="no_mask",
-                calc_type="calc_type_default",
-                output=attn_output,
-                softmax_lse=attn_lse,
-            )
-            attn_output = attn_output.reshape(
-                [-1, layer.tp_q_head_num, layer.v_head_dim]
-            )
-            if num_token_padding != forward_batch.num_token_non_padded_cpu:
-                attn_output = torch.cat(
-                    [
-                        attn_output,
-                        attn_output.new_zeros(
-                            num_token_padding - attn_output.shape[0],
-                            *attn_output.shape[1:],
-                        ),
-                    ],
-                    dim=0,
+                ):
+                    k_cur_slice = k[None, q_len_offset : q_len_offset + q_len]
+                    v_cur_slice = v[None, q_len_offset : q_len_offset + q_len]
+                    k_pre_slice = k_pre[
+                        None, prefix_len_offset : prefix_len_offset + prefix_len
+                    ]
+                    v_pre_slice = v_pre[
+                        None, prefix_len_offset : prefix_len_offset + prefix_len
+                    ]
+
+                    k_full = torch.cat([k_pre_slice, k_cur_slice], dim=1)
+                    v_full = torch.cat([v_pre_slice, v_cur_slice], dim=1)
+
+                    attn_output[q_len_offset : q_len_offset + q_len] = (
+                        torch.ops.npu.npu_fused_infer_attention_score(
+                            q[None, q_len_offset : q_len_offset + q_len],
+                            k_full,
+                            v_full,
+                            num_heads=layer.tp_q_head_num,
+                            num_key_value_heads=layer.tp_k_head_num,
+                            input_layout="BSND",  # todo, TND not supports q_heads!=k_heads
+                            atten_mask=self.fia_mask.unsqueeze(0),
+                            sparse_mode=3 if q_len != 1 else 0,
+                            scale=layer.scaling,
+                            next_tokens=0,
+                        )[0]
+                    )
+                    q_len_offset += q_len
+                    prefix_len_offset += prefix_len
+                attn_output = attn_output.view(
+                    -1, layer.tp_q_head_num * layer.v_head_dim
                 )
+            else:
+                num_token_padding = q.shape[0]
+                q, k, v = [
+                    data[: forward_batch.num_token_non_padded_cpu] for data in [q, k, v]
+                ]
+                q_nope, q_rope = q.split(
+                    [layer.v_head_dim, self.qk_rope_head_dim], dim=-1
+                )
+                k_nope, k_rope = k.split(
+                    [layer.v_head_dim, self.qk_rope_head_dim], dim=-1
+                )
+
+                # 1st, compute extend tokens to get attn_output and attn_lse
+                num_tokens = q_nope.size(0)
+                attn_output = torch.zeros(
+                    num_tokens,
+                    layer.tp_q_head_num,
+                    layer.v_head_dim,
+                    dtype=q_nope.dtype,
+                    device=q_nope.device,
+                )
+                attn_lse = torch.zeros(
+                    layer.tp_q_head_num,
+                    num_tokens,
+                    dtype=torch.float32,
+                    device=q_nope.device,
+                )
+                torch_npu.atb.npu_ring_mla(
+                    q_nope=q_nope,
+                    q_rope=q_rope,
+                    k_nope=k_nope,
+                    k_rope=k_rope,
+                    value=v,
+                    mask=self.ringmla_mask,
+                    seqlen=self.forward_metadata.extend_seq_lens_cpu_int,
+                    head_num=layer.tp_q_head_num,
+                    kv_head_num=layer.tp_k_head_num,
+                    pre_out=None,
+                    prev_lse=None,
+                    qk_scale=layer.scaling,
+                    kernel_type="kernel_type_high_precision",
+                    mask_type="mask_type_triu",
+                    calc_type="calc_type_first_ring",
+                    output=attn_output,
+                    softmax_lse=attn_lse,
+                )
+
+                # 2nd, load history kvcache(kv_a and k_pe) and calculate k_nope
+                k_buffer = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
+                v_buffer = forward_batch.token_to_kv_pool.get_value_buffer(
+                    layer.layer_id
+                )
+                kv_cached = torch.index_select(
+                    k_buffer, 0, self.forward_metadata.flatten_prefix_block_tables
+                )
+                k_rope_cached = torch.index_select(
+                    v_buffer, 0, self.forward_metadata.flatten_prefix_block_tables
+                ).flatten(0, 1)
+
+                assert layer.kv_b_proj is not None
+                kv = layer.kv_b_proj(kv_cached)[0].view(
+                    -1, layer.tp_k_head_num, self.qk_nope_head_dim + layer.v_head_dim
+                )
+                k_nope, v = kv.split([self.qk_nope_head_dim, layer.v_head_dim], dim=-1)
+
+                # 3rd, compute history kv to attn_out
+                k_rope = k_rope_cached.expand(-1, layer.tp_k_head_num, -1)
+                seq_len = torch.stack(
+                    [
+                        self.forward_metadata.extend_seq_lens_cpu_int,
+                        self.forward_metadata.prefix_lens,
+                    ]
+                )
+                torch_npu.atb.npu_ring_mla(
+                    q_nope=q_nope,
+                    q_rope=q_rope,
+                    k_nope=k_nope,
+                    k_rope=k_rope,
+                    value=v,
+                    mask=self.ringmla_mask,
+                    seqlen=seq_len,
+                    head_num=layer.tp_q_head_num,
+                    kv_head_num=layer.tp_k_head_num,
+                    pre_out=attn_output,
+                    prev_lse=attn_lse,
+                    qk_scale=layer.scaling,
+                    kernel_type="kernel_type_high_precision",
+                    mask_type="no_mask",
+                    calc_type="calc_type_default",
+                    output=attn_output,
+                    softmax_lse=attn_lse,
+                )
+                attn_output = attn_output.reshape(
+                    [-1, layer.tp_q_head_num, layer.v_head_dim]
+                )
+                if num_token_padding != forward_batch.num_token_non_padded_cpu:
+                    attn_output = torch.cat(
+                        [
+                            attn_output,
+                            attn_output.new_zeros(
+                                num_token_padding - attn_output.shape[0],
+                                *attn_output.shape[1:],
+                            ),
+                        ],
+                        dim=0,
+                    )
         else:
             if layer.qk_head_dim == layer.v_head_dim:
                 """FIA will support multi-bs in the later version of CANN"""
