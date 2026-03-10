@@ -957,12 +957,12 @@ def is_batch_invariant_mode_enabled():
 def enable_batch_invariant_mode(
     enable_bmm: bool = True,
 ):
-    if not _is_npu:
-        global _batch_invariant_MODE, _batch_invariant_LIB, _original_torch_bmm
-        if _batch_invariant_MODE:
-            return
+    global _batch_invariant_MODE, _batch_invariant_LIB, _original_torch_bmm
+    if _batch_invariant_MODE:
+        return
 
-        _batch_invariant_MODE = True
+    _batch_invariant_MODE = True
+    if not _is_npu:
         _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
         _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "CUDA")
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "CUDA")
