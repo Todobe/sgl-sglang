@@ -21,6 +21,7 @@ from sglang.srt.hardware_backend.npu.attention.mla_preprocess import (
 )
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.attention.nsa.utils import is_nsa_enable_prefill_cp
+from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.layers.radix_attention import AttentionType
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.speculative.spec_info import SpecInput
@@ -252,7 +253,7 @@ class AscendAttnBackend(AttentionBackend):
         )
         if self.use_mla:
             self.ringmla_mask = self.ascend_attn_mask_builder.ringmla_mask
-        
+
         # head num padding
         self.padding_size_list = [1, 2, 4, 8, 16, 32, 64, 128]
         self.q_head_num_padding = None
@@ -416,6 +417,32 @@ class AscendAttnBackend(AttentionBackend):
             )
             metadata.seq_lens_list_cumsum = (
                 torch.cumsum(extend_seq_lens_cpu_int, dim=0).int().tolist()
+            )
+
+        if (
+            self.q_head_num_padding is not None
+            and self.q_head_num_padding > self.tp_q_head_num
+        ):
+            # TODO: Adapt different dtype from model config
+            metadata.nope_padding = torch.empty(
+                [
+                    bs,
+                    1,
+                    self.q_head_num_padding - self.tp_q_head_num,
+                    self.kv_lora_rank,
+                ],
+                dtype=torch.bfloat16,
+                device=seq_lens.device,
+            )
+            metadata.rope_padding = torch.empty(
+                [
+                    bs,
+                    1,
+                    self.q_head_num_padding - self.tp_q_head_num,
+                    self.qk_rope_head_dim,
+                ],
+                dtype=torch.bfloat16,
+                device=seq_lens.device,
             )
 
         self.graph_metadata[bs] = metadata
@@ -1515,14 +1542,22 @@ class AscendAttnBackend(AttentionBackend):
             q_rope = q_rope.view(-1, 1, layer.tp_q_head_num, self.qk_rope_head_dim)
 
             assert (
-                self.q_head_num_padding is None 
+                self.q_head_num_padding is None
                 or self.q_head_num_padding >= layer.tp_q_head_num
             )
 
-            if self.q_head_num_padding > layer.tp_q_head_num:
-                padding_size = self.q_head_num_padding - layer.tp_q_head_num
-                q_nope = torch.nn.functional.pad(q_nope, (0, 0, 0, padding_size))
-                q_rope = torch.nn.functional.pad(q_rope, (0, 0, 0, padding_size))
+            if (
+                self.q_head_num_padding is not None
+                and self.q_head_num_padding > layer.tp_q_head_num
+            ):
+                q_nope = torch.cat(
+                    [q_nope, self.forward_metadata.nope_padding], dim=2
+                ).contiguous()
+                q_rope = torch.cat(
+                    [q_rope, self.forward_metadata.rope_padding], dim=2
+                ).contiguous()
+            else:
+                self.q_head_num_padding = layer.tp_q_head_num
 
             if self.forward_metadata.seq_lens_cpu_int is None:
                 actual_seq_len_kv = self.forward_metadata.seq_lens_cpu_list
