@@ -360,7 +360,31 @@ class AscendAttnBackend(AttentionBackend):
                 dtype=torch.int32,
                 device=seq_lens.device,
             )
-
+        if (
+            self.q_head_num_padding is not None
+            and self.q_head_num_padding > self.tp_q_head_num
+        ):
+            # TODO: Adapt different dtype from model config
+            metadata.nope_padding = torch.empty(
+                [
+                    bs,
+                    1,
+                    self.q_head_num_padding - self.tp_q_head_num,
+                    self.kv_lora_rank,
+                ],
+                dtype=torch.bfloat16,
+                device=seq_lens.device,
+            )
+            metadata.rope_padding = torch.empty(
+                [
+                    bs,
+                    1,
+                    self.q_head_num_padding - self.tp_q_head_num,
+                    self.qk_rope_head_dim,
+                ],
+                dtype=torch.bfloat16,
+                device=seq_lens.device,
+            )
         self.graph_metadata[bs] = metadata
         self.forward_metadata = metadata
 
@@ -1279,10 +1303,18 @@ class AscendAttnBackend(AttentionBackend):
                 or self.q_head_num_padding >= layer.tp_q_head_num
             )
 
-            if self.q_head_num_padding > layer.tp_q_head_num:
-                padding_size = self.q_head_num_padding - layer.tp_q_head_num
-                q_nope = torch.nn.functional.pad(q_nope, (0, 0, 0, padding_size))
-                q_rope = torch.nn.functional.pad(q_rope, (0, 0, 0, padding_size))
+            if (
+                self.q_head_num_padding is not None
+                and self.q_head_num_padding > layer.tp_q_head_num
+            ):
+                q_nope = torch.cat(
+                    [q_nope, self.forward_metadata.nope_padding], dim=2
+                ).contiguous()
+                q_rope = torch.cat(
+                    [q_rope, self.forward_metadata.rope_padding], dim=2
+                ).contiguous()
+            else:
+                self.q_head_num_padding = layer.tp_q_head_num
 
             if self.forward_metadata.seq_lens_cpu_int is None:
                 actual_seq_len_kv = self.forward_metadata.seq_lens_cpu_list
