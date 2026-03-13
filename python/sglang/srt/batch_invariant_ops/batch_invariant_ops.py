@@ -491,7 +491,7 @@ def mean_dim(
         Tensor with mean values along specified dimension
     """
     # Validate inputs
-    assert input.is_cuda, "Input must be a CUDA tensor"
+    assert input.is_cuda or input.is_npu, "Input must be a CUDA tensor or a NPU tensor"
     assert (
         -input.ndim <= dim < input.ndim
     ), f"Invalid dimension {dim} for tensor with {input.ndim} dimensions"
@@ -994,9 +994,13 @@ def enable_batch_invariant_mode(
             "NPU",
         )
         _batch_invariant_LIB.impl(
+            "aten::mean.dim",
+            mean_batch_invariant,
+            "NPU"
+        )
+        _batch_invariant_LIB.impl(
             "aten::_log_softmax", _log_softmax_batch_invariant, "NPU"
         )
-
         torch.ops.npu.npu_fused_infer_attention_score = (
             torch.ops.batch_invariant_ops.npu_fused_infer_attention_score_batch_invariant
         )
