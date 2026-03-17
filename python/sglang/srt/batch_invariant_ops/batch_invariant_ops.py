@@ -578,6 +578,11 @@ def _log_softmax_batch_invariant(input, dim, _half_to_float):
     return log_softmax(input, dim=dim)
 
 
+def _npu_log_softmax_batch_invariant(input, dim, _half_to_float):
+    assert not _half_to_float, "not implemented"
+    return torch.ops.batch_invariant_ops.npu_log_softmax_batch_invariant(input, dim=dim)
+
+
 def mean_batch_invariant(input, dim, keepdim=False, dtype: torch.dtype | None = None):
     assert dtype is None or dtype == torch.float32, f"unsupported dtype: {dtype}"
     if len(dim) == 1:
@@ -999,7 +1004,9 @@ def enable_batch_invariant_mode(
             "NPU"
         )
         _batch_invariant_LIB.impl(
-            "aten::_log_softmax", _log_softmax_batch_invariant, "NPU"
+            "aten::_log_softmax",
+            _npu_log_softmax_batch_invariant,
+            "NPU"
         )
         torch.ops.npu.npu_fused_infer_attention_score = (
             torch.ops.batch_invariant_ops.npu_fused_infer_attention_score_batch_invariant
