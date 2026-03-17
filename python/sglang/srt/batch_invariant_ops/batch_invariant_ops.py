@@ -575,6 +575,11 @@ def addmm_batch_invariant(bias, a, b):
 
 def _log_softmax_batch_invariant(input, dim, _half_to_float):
     assert not _half_to_float, "not implemented"
+    return log_softmax(input, dim=dim)
+
+
+def _npu_log_softmax_batch_invariant(input, dim, _half_to_float):
+    assert not _half_to_float, "not implemented"
     return torch.ops.batch_invariant_ops.npu_log_softmax_batch_invariant(input, dim=dim)
 
 
@@ -1000,10 +1005,9 @@ def enable_batch_invariant_mode(
         )
         _batch_invariant_LIB.impl(
             "aten::_log_softmax",
-            _log_softmax_batch_invariant,
+            _npu_log_softmax_batch_invariant,
             "NPU"
         )
-
         torch.ops.npu.npu_fused_infer_attention_score = (
             torch.ops.batch_invariant_ops.npu_fused_infer_attention_score_batch_invariant
         )
