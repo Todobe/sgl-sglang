@@ -575,7 +575,7 @@ def addmm_batch_invariant(bias, a, b):
 
 def _log_softmax_batch_invariant(input, dim, _half_to_float):
     assert not _half_to_float, "not implemented"
-    return log_softmax(input, dim=dim)
+    return torch.ops.batch_invariant_ops.npu_log_softmax_batch_invariant(input, dim=dim)
 
 
 def mean_batch_invariant(input, dim, keepdim=False, dtype: torch.dtype | None = None):
@@ -996,6 +996,11 @@ def enable_batch_invariant_mode(
         _batch_invariant_LIB.impl(
             "aten::mean.dim",
             mean_batch_invariant,
+            "NPU"
+        )
+        _batch_invariant_LIB.impl(
+            "aten::_log_softmax",
+            _log_softmax_batch_invariant,
             "NPU"
         )
 
