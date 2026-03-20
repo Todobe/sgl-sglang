@@ -218,6 +218,7 @@ class AscendAttnBackend(AttentionBackend):
         self.req_to_token = model_runner.req_to_token_pool.req_to_token
         self.graph_mode = False
         self.use_fia = get_bool_env_var("ASCEND_USE_FIA", "False")
+        self.use_fusion_attn = get_bool_env_var("ASCEND_USE_FUSION_ATTN", "False")
         self.enable_torch_compile = model_runner.server_args.enable_torch_compile
         self.speculative_num_draft_tokens = (
             model_runner.server_args.speculative_num_draft_tokens
@@ -618,6 +619,34 @@ class AscendAttnBackend(AttentionBackend):
             v_cache = forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id)
 
             if self.use_fia:
+                q = q.reshape(-1, layer.tp_q_head_num, layer.qk_head_dim)
+
+                actual_seq_lengths_kv = [prefix_len + extend_len for prefix_len, extend_len in zip(
+                    forward_batch.extend_prefix_lens_cpu,
+                    forward_batch.extend_seq_lens_cpu
+                )]
+
+                attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+                    query=q,
+                    key=k_cache.view(-1, self.page_size, layer.tp_k_head_num * layer.qk_head_dim),
+                    value=v_cache.view(-1, self.page_size, layer.tp_v_head_num * layer.v_head_dim),
+                    block_table=self.forward_metadata.block_tables,
+                    block_size=self.page_size,
+                    num_heads=layer.tp_q_head_num,
+                    num_key_value_heads=layer.tp_k_head_num,
+                    input_layout="TND",
+                    atten_mask=self.fia_mask,
+                    sparse_mode=3,
+                    scale=layer.scaling,
+                    actual_seq_lengths=self.forward_metadata.seq_lens_list_cumsum,
+                    actual_seq_lengths_kv=actual_seq_lengths_kv,
+                )
+
+                attn_output = attn_output.view(
+                    -1, layer.tp_q_head_num * layer.v_head_dim
+                )
+
+            elif self.use_fusion_attn:
                 prefix_indices = []
                 req_indices = forward_batch.req_to_token_pool.req_to_token[forward_batch.req_pool_indices]
                 for i, prefix_len in enumerate(forward_batch.extend_prefix_lens_cpu):
@@ -627,13 +656,13 @@ class AscendAttnBackend(AttentionBackend):
                         prefix_indices.append(torch.empty(0, dtype=torch.int32, device=req_indices.device))
                 prefix_indices = torch.cat(prefix_indices, dim=0).to(k_cache.device)
                 full_token_indices = torch.cat([prefix_indices, forward_batch.out_cache_loc], dim=0)
+                page_indices = full_token_indices // self.page_size
+                offsets = full_token_indices % self.page_size
 
-                k_full = k_cache[full_token_indices].view(-1, layer.tp_k_head_num, layer.qk_head_dim)
-                v_full = v_cache[full_token_indices].view(-1, layer.tp_v_head_num, layer.v_head_dim)
+                k_full = k_cache[page_indices, offsets].contiguous()
+                v_full = v_cache[page_indices, offsets].contiguous()
 
                 q = q.reshape(-1, layer.tp_q_head_num, layer.qk_head_dim)
-                num_token_with_padding = q.shape[0]
-                q = q[: forward_batch.num_token_non_padded_cpu]
 
                 actual_seq_lengths_kv = [prefix_len + extend_len for prefix_len, extend_len in zip(
                     forward_batch.extend_prefix_lens_cpu,
@@ -641,36 +670,22 @@ class AscendAttnBackend(AttentionBackend):
                 )]
                 actual_seq_lengths_kv_cumsum = np.cumsum(actual_seq_lengths_kv)
 
-                attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+                attn_output = torch_npu.npu_fusion_attention(
                     query=q,
                     key=k_full,
                     value=v_full,
-                    num_heads=layer.tp_q_head_num,
-                    num_key_value_heads=layer.tp_k_head_num,
+                    head_num=layer.tp_q_head_num,
                     input_layout="TND",
                     atten_mask=self.fia_mask,
                     sparse_mode=3,
                     scale=layer.scaling,
-                    next_tokens=0,
-                    actual_seq_lengths=self.forward_metadata.seq_lens_list_cumsum,
-                    actual_seq_lengths_kv=actual_seq_lengths_kv_cumsum,
-                )
+                    actual_seq_qlen=self.forward_metadata.seq_lens_list_cumsum,
+                    actual_seq_kvlen=actual_seq_lengths_kv_cumsum,
+                )[0]
 
                 attn_output = attn_output.view(
                     -1, layer.tp_q_head_num * layer.v_head_dim
                 )
-
-                if num_token_with_padding != forward_batch.num_token_non_padded_cpu:
-                    attn_output = torch.cat(
-                        [
-                            attn_output,
-                            attn_output.new_zeros(
-                                num_token_with_padding - attn_output.shape[0],
-                                *attn_output.shape[1:],
-                            ),
-                        ],
-                        dim=0,
-                    )
 
             else:
                 if layer.qk_head_dim <= 128:
@@ -1309,6 +1324,33 @@ class AscendAttnBackend(AttentionBackend):
                     actual_seq_lengths_kv=actual_seq_len_kv,
                     scale=layer.scaling,
                 )
+            elif self.use_fusion_attn:
+                token_indices = []
+                req_indices = forward_batch.req_to_token_pool.req_to_token[forward_batch.req_pool_indices]
+                for i, seq_len in enumerate(self.forward_metadata.seq_lens_cpu_int):
+                    token_indices.append(req_indices[i, :seq_len])
+                token_indices = torch.cat(token_indices, dim=0)
+
+                page_indices = token_indices // self.page_size
+                offsets = token_indices % self.page_size
+
+                k_full = k_cache[page_indices, offsets].contiguous()
+                v_full = v_cache[page_indices, offsets].contiguous()
+
+                q = q.reshape(-1, layer.tp_q_head_num, layer.qk_head_dim)
+
+                actual_seq_lengths_kv_cumsum = np.cumsum(self.forward_metadata.seq_lens_cpu_int).tolist()
+
+                attn_output = torch_npu.npu_fusion_attention(
+                    query=q,
+                    key=k_full,
+                    value=v_full,
+                    head_num=layer.tp_q_head_num,
+                    input_layout="TND",
+                    scale=layer.scaling,
+                    actual_seq_qlen=np.cumsum([1] * forward_batch.batch_size).tolist(),
+                    actual_seq_kvlen=actual_seq_lengths_kv_cumsum,
+                )[0]
             else:
                 query = q.reshape(-1, layer.tp_q_head_num, layer.qk_head_dim)
                 num_tokens = query.shape[0]
