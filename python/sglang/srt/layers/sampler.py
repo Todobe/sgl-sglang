@@ -119,7 +119,7 @@ class Sampler(nn.Module):
             # Post process logits
             logits.div_(sampling_info.temperatures)
             # For ascend backend, softmax is not needed before sampling
-            if not get_global_server_args().sampling_backend == "ascend":
+            if not get_global_server_args().sampling_backend == "ascend" or can_sample_directly_from_probs:
                 logits[:] = torch.softmax(logits, dim=-1)
             probs = logits
             del logits
