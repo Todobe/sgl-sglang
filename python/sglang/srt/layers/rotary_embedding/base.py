@@ -242,7 +242,13 @@ class RotaryEmbedding(MultiPlatformOp):
             rotary_mode = "half"
         else:
             rotary_mode = "interleave"
+
         mrope_section = [0, 0, 0]
+        query_shape = query.shape
+        key_shape = key.shape
+        query = query.reshape(query.shape[0], -1)
+        key = key.reshape(key.shape[0], -1)
+
         query_out, key_out = torch_npu.npu_mrope(
             positions,
             query,
@@ -252,6 +258,9 @@ class RotaryEmbedding(MultiPlatformOp):
             mrope_section=mrope_section,
             rotary_mode=rotary_mode,
         )
+
+        query_out = query_out.reshape(query_shape)
+        key_out = key_out.reshape(key_shape)
         return query_out, key_out
 
     def forward_cpu(

@@ -1046,10 +1046,35 @@ class AscendAttnBackend(AttentionBackend):
                     dim=0,
                 )
         else:
-            assert (
-                layer.qk_head_dim != layer.v_head_dim
-            ), "FIA only supports qk_head_dim != v_head_dim"
-            if layer.v_head_dim in [256]:
+            if layer.qk_head_dim == layer.v_head_dim:
+                """FIA will support multi-bs in the later version of CANN"""
+                q = q.reshape(-1, layer.tp_q_head_num, layer.qk_head_dim)
+                attn_output = torch.empty(
+                    (q.size(0), layer.tp_q_head_num, layer.v_head_dim),
+                    device=q.device,
+                    dtype=q.dtype,
+                )
+                q_len_offset = 0
+                for q_len in forward_batch.extend_seq_lens_cpu:
+                    attn_output[q_len_offset : q_len_offset + q_len] = (
+                        torch.ops.npu.npu_fused_infer_attention_score(
+                            q[None, q_len_offset : q_len_offset + q_len],
+                            k[None, q_len_offset : q_len_offset + q_len],
+                            v[None, q_len_offset : q_len_offset + q_len],
+                            num_heads=layer.tp_q_head_num,
+                            num_key_value_heads=layer.tp_k_head_num,
+                            input_layout="BSND",  # todo, TND not supports q_heads!=k_heads
+                            atten_mask=self.fia_mask.unsqueeze(0),
+                            sparse_mode=3 if q_len != 1 else 0,
+                            scale=layer.scaling,
+                            next_tokens=0,
+                        )[0]
+                    )
+                    q_len_offset += q_len
+                attn_output = attn_output.view(
+                    -1, layer.tp_q_head_num * layer.v_head_dim
+                )
+            elif layer.v_head_dim in [256]:
                 """Currently, in NO_QUANT situation, qk_nope_head_dim == v_head_dim, and rope exists, v_head_dim only support 512 and 128"""
                 kv_lora_rank = k.shape[-1] - self.qk_rope_head_dim
                 kv_c, k_rope = k.split([kv_lora_rank, self.qk_rope_head_dim], dim=-1)
