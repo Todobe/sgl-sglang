@@ -1022,41 +1022,21 @@ class AscendAttnBackend(AttentionBackend):
                 k_nope, k_rope = k.split(
                     [layer.v_head_dim, self.qk_rope_head_dim], dim=-1
                 )
-
-                if get_bool_env_var("USE_FIA_NATIVE", "False"):
-                    from sglang.srt.hardware_backend.npu.attention.mla_attention_native import fused_infer_attention_score_native  as fused_attn
-                    attn_output, _ = fused_attn(
-                        q_nope,
-                        k_nope,
-                        v,
-                        query_rope=q_rope,
-                        key_rope=k_rope,
-                        num_heads=layer.tp_q_head_num,
-                        num_key_value_heads=layer.tp_k_head_num,
-                        input_layout="TND",
-                        atten_mask=self.fia_mask,
-                        sparse_mode=3,  # causal
-                        actual_seq_lengths=self.forward_metadata.seq_lens_list_cumsum,
-                        actual_seq_lengths_kv=self.forward_metadata.seq_lens_list_cumsum,
-                        scale=layer.scaling,
-                        next_tokens=0,
-                    )
-                else:
-                    attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
-                        q_nope,
-                        k_nope,
-                        v,
-                        query_rope=q_rope,
-                        key_rope=k_rope,
-                        num_heads=layer.tp_q_head_num,
-                        input_layout="TND",
-                        atten_mask=self.fia_mask,
-                        sparse_mode=3,
-                        actual_seq_lengths=self.forward_metadata.seq_lens_list_cumsum,
-                        actual_seq_lengths_kv=self.forward_metadata.seq_lens_list_cumsum,
-                        scale=layer.scaling,
-                        next_tokens=0,
-                    )
+                attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+                    q_nope,
+                    k_nope,
+                    v,
+                    query_rope=q_rope,
+                    key_rope=k_rope,
+                    num_heads=layer.tp_q_head_num,
+                    input_layout="TND",
+                    atten_mask=self.fia_mask,
+                    sparse_mode=3,
+                    actual_seq_lengths=self.forward_metadata.seq_lens_list_cumsum,
+                    actual_seq_lengths_kv=self.forward_metadata.seq_lens_list_cumsum,
+                    scale=layer.scaling,
+                    next_tokens=0,
+                )
 
                 attn_output = attn_output.reshape(
                     -1, layer.tp_q_head_num, layer.v_head_dim
@@ -1580,43 +1560,24 @@ class AscendAttnBackend(AttentionBackend):
                     layer.tp_q_head_num,
                     self.qk_rope_head_dim,
                 )
-                if get_bool_env_var("USE_FIA_NATIVE", "False"):
-                    from sglang.srt.hardware_backend.npu.attention.mla_attention_native import fused_infer_attention_score_native  as fused_attn
-                    attn_output, _ = fused_attn(
-                        q,
-                        kv_c,
-                        kv_c,
-                        query_rope=q_rope,
-                        key_rope=k_pe,
-                        num_heads=layer.tp_q_head_num,
-                        num_key_value_heads=layer.tp_k_head_num,
-                        input_layout="BSND",
-                        atten_mask=None,
-                        sparse_mode=0,
-                        scale=layer.scaling,
-                        block_table=self.forward_metadata.block_tables,
-                        block_size=self.page_size,
-                        actual_seq_lengths_kv=self.forward_metadata.seq_lens_cpu_int,
-                    )
-                else:
-                    attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
-                        q,
-                        kv_c,
-                        kv_c,
-                        query_rope=q_rope,
-                        key_rope=k_pe,
-                        num_heads=layer.tp_q_head_num,
-                        num_key_value_heads=layer.tp_k_head_num,
-                        input_layout="BSND",
-                        atten_mask=None,
-                        sparse_mode=0,
-                        scale=layer.scaling,
-                        antiquant_mode=0,
-                        antiquant_scale=None,
-                        block_table=self.forward_metadata.block_tables,
-                        block_size=self.page_size,
-                        actual_seq_lengths_kv=self.forward_metadata.seq_lens_cpu_int,
-                    )
+                attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+                    q,
+                    kv_c,
+                    kv_c,
+                    query_rope=q_rope,
+                    key_rope=k_pe,
+                    num_heads=layer.tp_q_head_num,
+                    num_key_value_heads=layer.tp_k_head_num,
+                    input_layout="BSND",
+                    atten_mask=None,
+                    sparse_mode=0,
+                    scale=layer.scaling,
+                    antiquant_mode=0,
+                    antiquant_scale=None,
+                    block_table=self.forward_metadata.block_tables,
+                    block_size=self.page_size,
+                    actual_seq_lengths_kv=self.forward_metadata.seq_lens_cpu_int,
+                )
             else:
                 assert (
                     self.graph_mode == False

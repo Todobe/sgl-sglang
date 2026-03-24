@@ -19,6 +19,7 @@ from sglang.srt.layers.quantization.modelslim.schemes import (
     ModelSlimScheme,
     ModelSlimW4A4Int4,
     ModelSlimW8A8Int8,
+    ModelSlimW8A8MxFp8,
 )
 from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
 from sglang.srt.utils import apply_module_patch
@@ -82,6 +83,7 @@ class ModelSlimConfig(QuantizationConfig):
         self.packed_modules_mapping = (
             packed_modules_mapping if packed_modules_mapping is not None else {}
         )
+        self.model_quant_type = quant_config.get("model_quant_type")
 
         for name in self.quant_description.keys():
             if "norm.bias" in name:
@@ -169,6 +171,10 @@ class ModelSlimConfig(QuantizationConfig):
             )
         elif quant_type == "W4A4_DYNAMIC":
             return ModelSlimW4A4Int4(
+                quant_config=self.quant_description, prefix=layer_name
+            )
+        elif quant_type == "W8A8_MXFP8":
+            return ModelSlimW8A8MxFp8(
                 quant_config=self.quant_description, prefix=layer_name
             )
         raise NotImplementedError("No modelslim compatible scheme was found.")

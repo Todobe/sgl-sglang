@@ -76,6 +76,7 @@ from sglang.srt.layers.quantization.fp8_utils import (
     channel_quant_to_tensor_quant,
     normalize_e4m3fn_to_e4m3fnuz,
     requant_weight_ue8m0_inplace,
+    dequant_mxfp8_weight_to_bf16,
 )
 from sglang.srt.layers.quantization.int8_utils import (
     block_dequant as int8_block_dequant,
@@ -126,6 +127,7 @@ elif _is_hip:
     )
 elif _is_npu:
     from sgl_kernel_npu.moe.zero_experts_compute_identity import zero_experts_compute_identity_triton
+    from sglang.srt.layers.quantization.modelslim.modelslim import ModelSlimConfig
 else:
     pass
 
@@ -837,6 +839,14 @@ class LongcatFlashForCausalLM(nn.Module):
                                 weight, weight_scale, weight_block_size
                             )
                             self_attn.w_scale = scale
+                    elif _is_npu and isinstance(self.quant_config, ModelSlimConfig):
+                        if self.quant_config.model_quant_type == "W8A8_MXFP8":
+                            weight = w
+                            weight_scale = self_attn.kv_b_proj.weight_scale
+                            w = dequant_mxfp8_weight_to_bf16(
+                                weight,
+                                weight_scale,
+                            )
                     else:
                         if _is_fp8_fnuz:
                             weight, weight_scale, _ = normalize_e4m3fn_to_e4m3fnuz(

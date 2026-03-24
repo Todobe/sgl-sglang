@@ -1272,3 +1272,42 @@ def validate_fp8_block_shape(
                     f"{output_partition_size} is not divisible by "
                     f"weight quantization block_n = {block_n}."
                 )
+
+
+def decode_ue8m0_to_fp32(scale_u8: torch.Tensor) -> torch.Tensor:
+    if scale_u8.dtype != torch.uint8:
+        raise TypeError(f"scale tensor must be torch.uint8, got {scale_u8.dtype}")
+
+    exponents = scale_u8.to(torch.int16)
+    base = torch.tensor(2.0, dtype=torch.float32, device=scale_u8.device)
+    out = torch.pow(base, (exponents - 127).to(torch.float32))
+    out = out.masked_fill(scale_u8 == 0xFF, float("nan"))
+    return out
+
+
+def dequant_mxfp8_weight_to_bf16(
+    q_weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+) -> torch.Tensor:
+    if q_weight.ndim != 2:
+        raise ValueError(f"Expected 2D quantized weight, got shape={tuple(q_weight.shape)}")
+    if weight_scale.ndim != 2:
+        raise ValueError(f"Expected 2D weight_scale, got shape={tuple(weight_scale.shape)}")
+
+    n, k = q_weight.shape
+    if weight_scale.shape[0] != n:
+        raise ValueError(
+            f"Scale first dim mismatch: weight.shape={tuple(q_weight.shape)}, "
+            f"scale.shape={tuple(weight_scale.shape)}"
+        )
+
+    expected_k_blocks = (k + 31) // 32
+    if weight_scale.shape[1] != expected_k_blocks:
+        raise ValueError(
+            f"Scale second dim mismatch: expected {(n, expected_k_blocks)}, "
+            f"got {tuple(weight_scale.shape)}"
+        )
+
+    scale_fp32 = decode_ue8m0_to_fp32(weight_scale)
+    expanded_scale = torch.repeat_interleave(scale_fp32, repeats=32, dim=1)[:, :k]
+    return (q_weight.to(torch.float32) * expanded_scale).to(torch.bfloat16)

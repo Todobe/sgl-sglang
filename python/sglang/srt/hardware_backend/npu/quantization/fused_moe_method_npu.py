@@ -32,6 +32,7 @@ def npu_fused_experts_fp8(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     top_k: int,
+    is_mxfp8 = False,
     **kwargs,
 ):
     original_shape = hidden_states.shape
@@ -60,28 +61,50 @@ def npu_fused_experts_fp8(
     )
     expert_tokens = expert_tokens.to(torch.int64)
     # gmm1: gate_up_proj
-    hidden_states = fp8_gmm_npu(
-        input=hidden_states,
-        input_scale=None,
-        weight=w13,
-        weight_scale=w13_weight_scale_inv,
-        group_list_type=0,
-        group_list=expert_tokens,
-        output_dtype=original_dtype,
-    )
+    if is_mxfp8:
+        hidden_states = mxfp8_gmm_npu(
+            input=hidden_states,
+            input_scale=None,
+            weight=w13,
+            weight_scale=w13_weight_scale_inv,
+            group_list_type=0,
+            group_list=expert_tokens,
+            output_dtype=original_dtype,
+        )
+    else: 
+        hidden_states = fp8_gmm_npu(
+            input=hidden_states,
+            input_scale=None,
+            weight=w13,
+            weight_scale=w13_weight_scale_inv,
+            group_list_type=0,
+            group_list=expert_tokens,
+            output_dtype=original_dtype,
+        )
  
     # act_fn: swiglu
     hidden_states = torch_npu.npu_swiglu(hidden_states)
     # gmm2: down_proj
-    hidden_states = fp8_gmm_npu(
-        input=hidden_states,
-        input_scale=None,
-        weight=w2,
-        weight_scale=w2_weight_scale_inv,
-        group_list_type=0,
-        group_list=expert_tokens,
-        output_dtype=original_dtype,
-    )
+    if is_mxfp8:
+        hidden_states = mxfp8_gmm_npu(
+            input=hidden_states,
+            input_scale=None,
+            weight=w2,
+            weight_scale=w2_weight_scale_inv,
+            group_list_type=0,
+            group_list=expert_tokens,
+            output_dtype=original_dtype,
+        )
+    else:
+        hidden_states = fp8_gmm_npu(
+            input=hidden_states,
+            input_scale=None,
+            weight=w2,
+            weight_scale=w2_weight_scale_inv,
+            group_list_type=0,
+            group_list=expert_tokens,
+            output_dtype=original_dtype,
+        )
  
     final_hidden_states = torch_npu.npu_moe_finalize_routing(
         hidden_states,
@@ -297,6 +320,45 @@ def npu_fused_moe_without_routing_weights_bf16(
     )[0]
     return hidden_states
 
+# MXFP8
+def mxfp8_gmm_npu(
+    input: torch.Tensor,
+    input_scale: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    group_list_type: int, 
+    group_list: torch.Tensor,
+    output_dtype=torch.bfloat16,
+) -> torch.Tensor:
+    group_list = group_list.to(torch.int64)
+
+    if input_scale == None:
+        x, x_scale = torch.ops.npu.npu_dynamic_mx_quant(
+            input,
+            axis=1,
+            round_mode="rint",
+            dst_type=torch.float8_e4m3fn,
+            block_size=32,
+            scale_alg=None,
+        )
+    else:
+        x, x_scale = input, input_scale 
+
+    output = torch.ops.npu.npu_grouped_matmul(
+        [x],
+        [weight],
+        scale=[weight_scale],
+        per_token_scale=[x_scale],
+        split_item=2,
+        group_type=0,
+        group_list=group_list,
+        group_list_type=group_list_type,
+        output_dtype=output_dtype,
+        scale_dtype=torch_npu.float8_e8m0fnu, 
+        per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+    )[0]
+    return output
+
 
 class _NPUFusedMoEMethodBase(FusedMoEMethodBase):
 
@@ -305,6 +367,93 @@ class _NPUFusedMoEMethodBase(FusedMoEMethodBase):
         quant_config: Optional["QuantizationConfig"] = None,
     ):
         self.quant_config = quant_config
+
+class NPUW8A8MxFp8DynamicMoEMethod(_NPUFusedMoEMethodBase):
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer.w13_weight.data = (
+            layer.w13_weight.data.transpose(1, 2).contiguous()
+        )
+        layer.w2_weight.data = (
+            layer.w2_weight.data.transpose(1, 2).contiguous()
+        )
+        w13_weight_scale = (
+            layer.w13_weight_scale.data.transpose(1, 2).contiguous()
+        )
+        w2_weight_scale = (
+            layer.w2_weight_scale.data.transpose(1, 2).contiguous()
+        )
+        # pack: [E, K32, N] -> [E, K64, N, 2]
+        e, k32, n = w13_weight_scale.shape
+        w13_weight_scale = w13_weight_scale.view(e, k32 // 2, 2, n).permute(0, 1, 3, 2).contiguous()
+
+        e, k32, n = w2_weight_scale.shape
+        w2_weight_scale = w2_weight_scale.view(e, k32 // 2, 2, n).permute(0, 1, 3, 2).contiguous()
+
+        layer.w13_weight_scale.data = w13_weight_scale
+        layer.w2_weight_scale.data  = w2_weight_scale
+
+    def apply(
+        self,
+        layer,
+        dispatch_output: "StandardDispatchOutput",
+    ) -> "CombineInput":
+        from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
+
+        x = dispatch_output.hidden_states
+        topk_output = dispatch_output.topk_output
+
+        topk_weights, topk_ids, _ = topk_output
+        topk_ids = topk_ids.to(torch.int32)
+        topk_weights = topk_weights.to(x.dtype)
+        output = npu_fused_experts_fp8(
+            hidden_states=x,
+            w13=layer.w13_weight,
+            w13_weight_scale_inv=layer.w13_weight_scale,
+            w2=layer.w2_weight,
+            w2_weight_scale_inv=layer.w2_weight_scale,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            top_k=topk_ids.shape[1],
+            is_mxfp8=True,
+        )
+        return StandardCombineInput(hidden_states=output)
+
+    # for fp8 deepep
+    def apply_without_routing_weights(
+        self,
+        layer,
+        hidden_states,
+        hidden_states_scale,
+        group_list_type,
+        group_list,
+        output_dtype,
+    ):
+        hidden_states = mxfp8_gmm_npu(
+            input=hidden_states,
+            input_scale=hidden_states_scale,
+            weight=layer.w13_weight,
+            weight_scale=layer.w13_weight_scale,
+            group_list_type=group_list_type,
+            group_list=group_list,
+            output_dtype=output_dtype,
+        )
+    
+        # act_fn: swiglu
+        hidden_states = torch_npu.npu_swiglu(hidden_states)
+    
+        # gmm2: down_proj
+        hidden_states = mxfp8_gmm_npu(
+            input=hidden_states,
+            input_scale=None,
+            weight=layer.w2_weight,
+            weight_scale=layer.w2_weight_scale,
+            group_list_type=group_list_type,
+            group_list=group_list,
+            output_dtype=output_dtype,
+        )
+    
+        return hidden_states
 
 
 class NPUW8A8Int8DynamicMoEMethod(_NPUFusedMoEMethodBase):
