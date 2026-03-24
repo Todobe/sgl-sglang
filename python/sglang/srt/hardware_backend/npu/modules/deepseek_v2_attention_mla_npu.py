@@ -8,6 +8,7 @@ from sglang.srt.hardware_backend.npu.attention.mla_preprocess import (
     NPUFusedMLAPreprocess,
     is_fia_nz,
     is_mla_preprocess_enabled,
+    is_longcat_mla_preprocess_enabled,
 )
 from sglang.srt.layers.attention.nsa.utils import (
     cp_split_and_rebuild_position,
@@ -162,17 +163,30 @@ def forward_mla_prepare_npu(
                 m.qk_rope_head_dim,
                 m.quant_config,
             )
-        (
-            q_pe,
-            k_pe,
-            q_nope_out,
-            k_nope,
-            forward_batch,
-            zero_allocator,
-            positions,
-        ) = m.mla_preprocess.forward(
-            positions, hidden_states, forward_batch, zero_allocator
-        )
+        if is_longcat_mla_preprocess_enabled():
+            (
+                q_pe,
+                k_pe,
+                q_nope_out,
+                k_nope,
+                q_lora,
+                forward_batch,
+                positions,
+            ) = m.mla_preprocess.forward(
+                positions, hidden_states, forward_batch, zero_allocator
+            )
+        else:
+            (
+                q_pe,
+                k_pe,
+                q_nope_out,
+                k_nope,
+                forward_batch,
+                zero_allocator,
+                positions,
+            ) = m.mla_preprocess.forward(
+                positions, hidden_states, forward_batch, zero_allocator
+            )
         topk_indices = None
     else:
         q_lora = None
