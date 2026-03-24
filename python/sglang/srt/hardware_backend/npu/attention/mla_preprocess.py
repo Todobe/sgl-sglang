@@ -100,10 +100,9 @@ class NPUFusedMLAPreprocess(torch.nn.Module):
         self.qk_rope_head_dim = qk_rope_head_dim  # 64
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.v_head_dim = v_head_dim
-        if not is_longcat_mla_preprocess_enabled():
-            self.q_b_proj_weight_scale = self.q_b_proj.weight_scale.view(1, -1).to(
-                torch.float
-            )
+        self.q_b_proj_weight_scale = self.q_b_proj.weight_scale.view(1, -1).to(
+            torch.float
+        )
 
     def preprocess_weights(self, hidden_states):
         self.dummy = torch.zeros(
@@ -444,7 +443,6 @@ class NPUFusedMLAPreprocess(torch.nn.Module):
                 "kv_cache": k_cache,
                 "kr_cache": v_cache,
                 "cache_index": slot_mapping.to(dtype=torch.int64),
-                "dequant_scale_w_uq_qr": self.q_b_proj_weight_scale,
                 "rmsnorm_epsilon_cq": self.q_a_layernorm.variance_epsilon,
                 "rmsnorm_epsilon_ckv": self.kv_a_layernorm.variance_epsilon,
                 "cache_mode": "PA_BSND",
