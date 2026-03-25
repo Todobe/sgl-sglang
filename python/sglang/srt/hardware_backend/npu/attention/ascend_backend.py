@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from flash_attn import flash_attn_with_kvcache
 from typing import TYPE_CHECKING, List, Optional
 
 import torch
@@ -217,6 +218,7 @@ class AscendAttnBackend(AttentionBackend):
         self.max_context_len = model_runner.model_config.context_len
         self.req_to_token = model_runner.req_to_token_pool.req_to_token
         self.graph_mode = False
+        self.use_fa = get_bool_env_var("ASCEND_USE_FA", "False")
         self.use_fia = get_bool_env_var("ASCEND_USE_FIA", "False")
         self.enable_torch_compile = model_runner.server_args.enable_torch_compile
         self.speculative_num_draft_tokens = (
@@ -617,7 +619,50 @@ class AscendAttnBackend(AttentionBackend):
             k_cache = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
             v_cache = forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id)
 
-            if self.use_fia:
+            if self.use_fa:
+                from flash_attn_v3 import flash_attn_with_kvcache
+
+                if self.forward_metadata.seq_lens_cpu_int is None:
+                    actual_seq_len_kv = self.forward_metadata.seq_lens_cpu_list
+                else:
+                    actual_seq_len_kv = (
+                        self.forward_metadata.seq_lens_cpu_int.cpu().int().tolist()
+                    )
+                q = q.reshape(-1, layer.tp_q_head_num, layer.qk_head_dim)
+                k = k_cache.view(
+                    -1, self.page_size, layer.tp_k_head_num, layer.qk_head_dim
+                )
+                v = v_cache.view(
+                    -1, self.page_size, layer.tp_v_head_num, layer.v_head_dim
+                )
+
+                extend_seq_lens = self.forward_metadata.extend_seq_lens_cpu_int.npu()
+                cu_seqlens_q = torch.cat([
+                    torch.zeros(1, dtype=torch.int32).npu(),
+                    extend_seq_lens.cumsum(0)
+                ])
+                max_seqlen_q = extend_seq_lens.max().item()
+                attn_output, softmax_lse, *rest = flash_attn_with_kvcache(
+                    q,
+                    k,
+                    v,
+                    cache_seqlens=torch.tensor(actual_seq_len_kv).npu(),
+                    page_table=self.forward_metadata.block_tables,
+                    cu_seqlens_q=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q,
+                    softmax_scale=layer.scaling,
+                    causal=True,
+                    window_size=[-1, -1],
+                    softcap=0.0,
+                    rotary_interleaved=False,
+                    num_splits=0,
+                    sm_margin=0,
+                    return_softmax_lse=True
+                )
+                attn_output = attn_output.view(
+                    -1, layer.tp_q_head_num * layer.v_head_dim
+                )
+            elif self.use_fia:
                 prefix_indices = []
                 req_indices = forward_batch.req_to_token_pool.req_to_token[forward_batch.req_pool_indices]
                 for i, prefix_len in enumerate(forward_batch.extend_prefix_lens_cpu):
@@ -1280,7 +1325,31 @@ class AscendAttnBackend(AttentionBackend):
             num_tokens = q.shape[0]
             k_cache = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
             v_cache = forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id)
-            if self.use_fia:
+            if self.use_fa:
+                if self.forward_metadata.seq_lens_cpu_int is None:
+                    actual_seq_len_kv = self.forward_metadata.seq_lens_cpu_list
+                else:
+                    actual_seq_len_kv = (
+                        self.forward_metadata.seq_lens_cpu_int.cpu().int().tolist()
+                    )
+                attn_output = flash_attn_with_kvcache(
+                    q.view(
+                        forward_batch.batch_size,
+                        -1,
+                        layer.tp_q_head_num,
+                        layer.qk_head_dim,
+                    ),
+                    k_cache.view(
+                        -1, self.page_size, layer.tp_k_head_num, layer.qk_head_dim
+                    ),
+                    v_cache.view(
+                        -1, self.page_size, layer.tp_v_head_num, layer.qk_head_dim
+                    ),
+                    block_table=self.forward_metadata.block_tables,
+                    cache_seqlens=torch.tensor(actual_seq_len_kv).npu(),
+                    softmax_scale=layer.scaling,
+                )
+            elif self.use_fia:
                 if self.forward_metadata.seq_lens_cpu_int is None:
                     actual_seq_len_kv = self.forward_metadata.seq_lens_cpu_list
                 else:
