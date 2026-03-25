@@ -994,7 +994,7 @@ def enable_batch_invariant_mode(
             "NPU",
         )
         _batch_invariant_LIB.impl(
-            "aten::sum",
+            "aten::sum.dim",
             torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant,
             "NPU",
         )
