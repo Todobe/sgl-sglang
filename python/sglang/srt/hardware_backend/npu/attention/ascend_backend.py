@@ -211,6 +211,7 @@ class AscendAttnBackend(AttentionBackend):
         self.forward_metadata = None
         self.device = model_runner.device
         self.page_size = model_runner.page_size
+        self.model_dtype = model_runner.model_config.dtype
         self.use_mla = model_runner.model_config.attention_arch == AttentionArch.MLA
         if self.use_mla:
             self.kv_lora_rank = model_runner.model_config.kv_lora_rank
@@ -423,7 +424,6 @@ class AscendAttnBackend(AttentionBackend):
             self.q_head_num_padding is not None
             and self.q_head_num_padding > self.tp_q_head_num
         ):
-            # TODO: Adapt different dtype from model config
             metadata.nope_padding = torch.empty(
                 [
                     bs,
@@ -431,7 +431,9 @@ class AscendAttnBackend(AttentionBackend):
                     self.q_head_num_padding - self.tp_q_head_num,
                     self.kv_lora_rank,
                 ],
-                dtype=torch.bfloat16,
+                dtype=(
+                    self.model_dtype if self.model_dtype is not None else torch.bfloat16
+                ),
                 device=seq_lens.device,
             )
             metadata.rope_padding = torch.empty(
@@ -441,7 +443,9 @@ class AscendAttnBackend(AttentionBackend):
                     self.q_head_num_padding - self.tp_q_head_num,
                     self.qk_rope_head_dim,
                 ],
-                dtype=torch.bfloat16,
+                dtype=(
+                    self.model_dtype if self.model_dtype is not None else torch.bfloat16
+                ),
                 device=seq_lens.device,
             )
 
@@ -1630,8 +1634,6 @@ class AscendAttnBackend(AttentionBackend):
                 q_rope = torch.cat(
                     [q_rope, self.forward_metadata.rope_padding], dim=2
                 ).contiguous()
-            else:
-                self.q_head_num_padding = layer.tp_q_head_num
 
             if self.forward_metadata.seq_lens_cpu_int is None:
                 actual_seq_len_kv = self.forward_metadata.seq_lens_cpu_list
