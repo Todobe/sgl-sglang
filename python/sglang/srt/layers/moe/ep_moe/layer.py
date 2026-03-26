@@ -36,6 +36,7 @@ from sglang.srt.layers.quantization.quark.quark_moe import QuarkW4A4MXFp4MoEMeth
 from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config, W4AFp8MoEMethod
 from sglang.srt.utils import get_bool_env_var, is_hip, is_npu
 from sglang.srt.hardware_backend.npu.quantization.fused_moe_method_npu import npu_apply_without_routing_weights_fp8
+from sglang.srt.layers.quantization.modelslim.modelslim import ModelSlimConfig
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (
@@ -126,6 +127,11 @@ class DeepEPMoE(FusedMoE):
             self.use_fp8_w8a8 = False
             self.use_block_quant = False
             self.use_w4afp8 = False
+
+            self.npu_use_mxfp8 = False
+            if _is_npu and isinstance(quant_config, ModelSlimConfig):
+                if quant_config.model_quant_type == "W8A8_MXFP8":
+                    self.npu_use_mxfp8 = True
 
         self.deepep_mode = get_deepep_mode()
 

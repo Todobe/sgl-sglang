@@ -333,20 +333,13 @@ class LongcatFlashMoE(nn.Module):
                 )
             else:
                 identity_mask_value = -1 if get_moe_a2a_backend().is_deepep() else 0
-                # zero_expert_result = zero_experts_compute_identity_triton(
-                #     expert_indices=topk_idx,
-                #     expert_scales=topk_weights,
-                #     num_experts=self.num_experts,
-                #     zero_expert_type=self.zero_expert_type,
-                #     hidden_states=hidden_states,
-                #     identity_mask_value=identity_mask_value,
-                # )
-                zero_expert_result = zero_experts_compute_native_deepep(
+                zero_expert_result = zero_experts_compute_identity_triton(
                     expert_indices=topk_idx,
                     expert_scales=topk_weights,
                     num_experts=self.num_experts,
                     zero_expert_type=self.zero_expert_type,
                     hidden_states=hidden_states,
+                    identity_mask_value=identity_mask_value,
                 )
         topk_output = StandardTopKOutput(topk_weights, topk_idx, _)
 
