@@ -258,7 +258,7 @@ class AscendAttnBackend(AttentionBackend):
         # head num padding
         self.padding_size_list = [1, 2, 4, 8, 16, 32, 64, 128]
         self.q_head_num_padding = None
-        if hasattr(model_runner.model_config, "num_attention_heads"):
+        if hasattr(model_runner.model_config, "num_attention_heads") and self.use_mla:
             self.tp_q_head_num = (
                 model_runner.model_config.num_attention_heads // get_attention_tp_size()
             )
