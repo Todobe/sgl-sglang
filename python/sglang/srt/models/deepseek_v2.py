@@ -1751,7 +1751,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states,
             residual,
             forward_batch,
-            getattr(self, '_gfx95_quant_format', ""),
+            getattr(self, "_gfx95_quant_format", ""),
         )
 
         hidden_states = self.self_attn(
