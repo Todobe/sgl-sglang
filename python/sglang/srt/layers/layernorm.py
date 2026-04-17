@@ -184,6 +184,10 @@ class RMSNorm(MultiPlatformOp):
         post_residual_addition: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if x.numel() == 0:
+            if residual is not None:
+                if post_residual_addition is not None:
+                    residual = residual + post_residual_addition
+                return x, residual
             return x
         # sgl_kernel rmsnorm requires 2D input; reshape higher-rank tensors
         needs_reshape = x.dim() != 2 and residual is None
@@ -695,6 +699,13 @@ class Gemma4RMSNorm(MultiPlatformOp):
         if self.with_scale:
             normed_output = normed_output * (self.weight.float() + self.scale_shift)
         return normed_output.type_as(x)
+
+    def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
+        if _is_cpu_amx_available:
+            return torch.ops.sgl_kernel.gemma4_rmsnorm_cpu(
+                x, self.weight.data, self.eps, self.scale_shift, self.with_scale
+            )
+        return self.forward_native(x)
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         if x.numel() == 0:
