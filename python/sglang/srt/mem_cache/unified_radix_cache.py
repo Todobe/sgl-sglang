@@ -306,6 +306,9 @@ class UnifiedRadixCache(BasePrefixCache):
         self.session.slots.clear()
         self.ongoing_write_through: dict[int, _OngoingWriteThrough] = {}
         self.ongoing_load_back: dict[int, _OngoingLoadBack] = {}
+        self.ongoing_shadow_load = {}
+        self.pending_shadow_load = []
+        self.next_shadow_load_id = -1
         self.enable_storage = False
         self.prefetch_loaded_tokens_by_reqid: dict[str, int] = {}
         self.ongoing_prefetch: dict[str, _OngoingPrefetch] = {}
@@ -380,6 +383,9 @@ class UnifiedRadixCache(BasePrefixCache):
                     pool=_COMPONENT_POOL_LABEL[ct],
                 )
         self.load_back_threshold = 1 if self.force_l2 else 10
+        self.ongoing_shadow_load = {}
+        self.pending_shadow_load = []
+        self.next_shadow_load_id = -1
         self.prefetch_stop_policy = server_args.hicache_storage_prefetch_policy
 
         if storage_backend is not None:
@@ -547,6 +553,66 @@ class UnifiedRadixCache(BasePrefixCache):
 
     def supports_force_l2(self) -> bool:
         return self.cache_controller is not None
+
+    def init_shadow_load(self, req: Req) -> bool:
+        if (
+            not self.force_l2
+            or self.cache_controller is None
+            or len(req.prefix_indices) == 0
+        ):
+            return False
+
+        node_id = req.last_node
+        node = self.tree_core.node_by_id(node_id)
+        host_chunks = []
+        while node is not self.tree_core.root_node:
+            host_value = node.component_data[BASE_COMPONENT_TYPE].host_value
+            if host_value is None:
+                return False
+            host_chunks.append(host_value)
+            node = node.parent
+        host_chunks.reverse()
+        host_indices = torch.cat(host_chunks)
+
+        host_lock_params = self.inc_host_lock_ref(node_id).to_dec_params()
+        self.pending_shadow_load.append((host_indices, node_id, host_lock_params))
+        return True
+
+    def _start_pending_shadow_loads(self) -> None:
+        """Start disposable H2D copies without adding them to a model consumer."""
+        if not self.pending_shadow_load:
+            return
+
+        pending, self.pending_shadow_load = self.pending_shadow_load, []
+        for host_indices, node_id, host_lock_params in pending:
+            shadow_id = self.next_shadow_load_id
+            self.next_shadow_load_id -= 1
+            kv_xfer = PoolTransfer(name=PoolName.KV, host_indices=host_indices)
+            sidecar_xfers = self._build_sidecar_transfers(
+                CacheTransferPhase.LOAD_BACK, kv_xfer, {}
+            )
+            device_indices = self.cache_controller.load(
+                host_indices=host_indices,
+                node_id=shadow_id,
+                extra_pools=sidecar_xfers or None,
+            )
+            if device_indices is None:
+                self.dec_host_lock_ref(node_id, host_lock_params)
+                logger.warning(
+                    "UnifiedHiCache shadow H2D skipped: insufficient L1 space for "
+                    "%d tokens",
+                    len(host_indices),
+                )
+                continue
+            self.ongoing_shadow_load[shadow_id] = (
+                device_indices,
+                node_id,
+                host_lock_params,
+            )
+
+        # Deliberately ignore the consumer id: model forward keeps using the
+        # shared L1 prefix and does not wait for this disposable transfer.
+        self.cache_controller.start_loading()
 
     def _free_values(
         self,
@@ -2034,6 +2100,17 @@ class UnifiedRadixCache(BasePrefixCache):
             ack.finish_event.synchronize()
             logger.info("UnifiedHiCache H2D completed: tokens=%d", ack.num_tokens)
             for ack_id in ack.node_ids:
+                shadow = self.ongoing_shadow_load.pop(ack_id, None)
+                if shadow is not None:
+                    device_indices, node_id, shadow_host_lock_params = shadow
+                    full_allocator = getattr(
+                        self.token_to_kv_pool_allocator,
+                        "full_attn_allocator",
+                        self.token_to_kv_pool_allocator,
+                    )
+                    full_allocator.free(device_indices)
+                    self.dec_host_lock_ref(node_id, shadow_host_lock_params)
+                    continue
                 node, lock_params, host_lock_params = self.ongoing_load_back.pop(ack_id)
                 self.dec_lock_ref(node, lock_params)
                 self.dec_host_lock_ref(node, host_lock_params)
@@ -2143,7 +2220,9 @@ class UnifiedRadixCache(BasePrefixCache):
     def ready_to_load_host_cache(self) -> int:
         """Notify the cache controller to start the KV cache loading."""
         if self.cache_controller is not None:
-            return self.cache_controller.start_loading()
+            consumer_id = self.cache_controller.start_loading()
+            self._start_pending_shadow_loads()
+            return consumer_id
         return 0
 
     # ---- Query / Inspection APIs ----

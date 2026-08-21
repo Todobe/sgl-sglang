@@ -340,6 +340,10 @@ class BasePrefixCache(ABC, PrefixCacheTrait):
     def supports_force_l2(self) -> bool:
         return False
 
+    def init_shadow_load(self, req: Req) -> bool:
+        """Optionally enqueue a disposable L2-to-L1 copy for an L1 hit."""
+        return False
+
     def full_evictable_size(self):
         return 0
 

@@ -1311,6 +1311,11 @@ class PrefillAdder:
                 return AddReqResult.OTHER
 
             if req.needs_host_load_back():
+                if len(req.prefix_indices) > 0:
+                    # A mixed L1+L2 hit also replays the already-resident L1
+                    # portion through a disposable H2D. Register it before
+                    # init_load_back updates req.last_node to the L2 endpoint.
+                    self.tree_cache.init_shadow_load(req)
                 new_indices, req.last_node = self.tree_cache.init_load_back(
                     InitLoadBackParams(
                         best_match_node=req.best_match_node,
@@ -1321,6 +1326,11 @@ class PrefillAdder:
                 req.prefix_indices = torch.cat([req.prefix_indices, new_indices])
                 prefix_len = len(req.prefix_indices)
                 req.cache_protected_len = prefix_len
+            elif len(req.prefix_indices) > 0:
+                # A pure L1 hit performs a real H2D into disposable slots. The
+                # request keeps using the shared radix-tree slots; the shadow
+                # slots are freed on H2D ack.
+                self.tree_cache.init_shadow_load(req)
 
             input_tokens = self.ceil_paged_tokens(
                 len(req.full_untruncated_fill_ids) - len(req.prefix_indices)

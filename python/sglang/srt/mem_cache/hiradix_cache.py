@@ -195,6 +195,9 @@ class HiRadixCache(RadixCache):
         self.ongoing_write_through = {}
         # record the node segments with ongoing load back
         self.ongoing_load_back = {}
+        self.ongoing_shadow_load = {}
+        self.pending_shadow_load = []
+        self.next_shadow_load_id = -1
         # record the ongoing prefetch requests
         self.ongoing_prefetch = {}
         self.ongoing_backup = {}
@@ -785,6 +788,9 @@ class HiRadixCache(RadixCache):
         self.token_to_kv_pool_host.clear()
         # Clear per-request tracking dicts
         self.prefetch_loaded_tokens_by_reqid.clear()
+        self.ongoing_shadow_load.clear()
+        self.pending_shadow_load.clear()
+        self.next_shadow_load_id = -1
         self.evictable_host_leaves.clear()
         super().reset()
 
@@ -1118,6 +1124,12 @@ class HiRadixCache(RadixCache):
             ack.finish_event.synchronize()
             logger.info("HiCache H2D completed: tokens=%d", ack.num_tokens)
             for ack_id in ack.node_ids:
+                shadow = self.ongoing_shadow_load.pop(ack_id, None)
+                if shadow is not None:
+                    device_indices, host_node = shadow
+                    self.cache_controller.evict_device(device_indices)
+                    host_node.release_host()
+                    continue
                 end_node = self.ongoing_load_back.pop(ack_id)
                 self.dec_lock_ref(end_node)
 
@@ -1234,6 +1246,51 @@ class HiRadixCache(RadixCache):
 
     def supports_force_l2(self) -> bool:
         return True
+
+    def init_shadow_load(self, req: Req) -> bool:
+        if not self.force_l2 or len(req.prefix_indices) == 0:
+            return False
+
+        node = req.last_node
+        host_chunks = []
+        while node is not self.root_node:
+            if not node.backuped or node.host_value is None:
+                return False
+            host_chunks.append(node.host_value)
+            node = node.parent
+        host_chunks.reverse()
+        host_indices = torch.cat(host_chunks)
+
+        req.last_node.protect_host()
+        self.pending_shadow_load.append((host_indices, req.last_node))
+        return True
+
+    def _start_pending_shadow_loads(self) -> None:
+        """Start disposable H2D copies without adding them to a model consumer."""
+        if not self.pending_shadow_load:
+            return
+
+        pending, self.pending_shadow_load = self.pending_shadow_load, []
+        for host_indices, host_node in pending:
+            shadow_id = self.next_shadow_load_id
+            self.next_shadow_load_id -= 1
+            device_indices = self.cache_controller.load(
+                host_indices=host_indices,
+                node_id=shadow_id,
+                **self._get_extra_pools(),
+            )
+            if device_indices is None:
+                host_node.release_host()
+                logger.warning(
+                    "HiCache shadow H2D skipped: insufficient L1 space for %d tokens",
+                    len(host_indices),
+                )
+                continue
+            self.ongoing_shadow_load[shadow_id] = (device_indices, host_node)
+
+        # Deliberately ignore the consumer id: model forward keeps using the
+        # shared L1 prefix and does not wait for this disposable transfer.
+        self.cache_controller.start_loading()
 
     def _make_eviction_heap(self):
         heap = [
@@ -1596,7 +1653,9 @@ class HiRadixCache(RadixCache):
         Notify the cache controller to start the KV cache loading.
         Return the consumer index for the schedule batch manager to track.
         """
-        return self.cache_controller.start_loading()
+        consumer_id = self.cache_controller.start_loading()
+        self._start_pending_shadow_loads()
+        return consumer_id
 
     def check_hicache_events(self):
         # Reap the previous round's PP-sync sends before issuing new ones.
