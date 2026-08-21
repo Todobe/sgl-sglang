@@ -1116,6 +1116,7 @@ class HiRadixCache(RadixCache):
         while finish_count > 0:
             ack = self.cache_controller.ack_load_queue.pop(0)
             ack.finish_event.synchronize()
+            logger.info("HiCache H2D completed: tokens=%d", ack.num_tokens)
             for ack_id in ack.node_ids:
                 end_node = self.ongoing_load_back.pop(ack_id)
                 self.dec_lock_ref(end_node)
