@@ -578,10 +578,10 @@ class UnifiedRadixCache(BasePrefixCache):
         self.pending_shadow_load.append((host_indices, node_id, host_lock_params))
         return True
 
-    def _start_pending_shadow_loads(self) -> int:
-        """Start disposable H2D copies and return their model consumer id."""
+    def _enqueue_pending_shadow_loads(self) -> None:
+        """Add disposable L1-prefix copies to the current H2D batch."""
         if not self.pending_shadow_load:
-            return -1
+            return
 
         pending, self.pending_shadow_load = self.pending_shadow_load, []
         for host_indices, node_id, host_lock_params in pending:
@@ -609,11 +609,6 @@ class UnifiedRadixCache(BasePrefixCache):
                 node_id,
                 host_lock_params,
             )
-
-        # Although forward keeps using the shared L1 prefix, force-L2 mode is
-        # intended to reproduce L1-miss/L2-hit latency, so it must wait for the
-        # disposable H2D to finish.
-        return self.cache_controller.start_loading()
 
     def _free_values(
         self,
@@ -2221,15 +2216,11 @@ class UnifiedRadixCache(BasePrefixCache):
     def ready_to_load_host_cache(self) -> int:
         """Notify the cache controller to start the KV cache loading."""
         if self.cache_controller is not None:
-            consumer_id = self.cache_controller.start_loading()
-            shadow_consumer_id = self._start_pending_shadow_loads()
-            # Shadow loads are queued after normal load-back on the same load
-            # stream. Waiting for the shadow consumer therefore covers both.
-            return (
-                shadow_consumer_id
-                if shadow_consumer_id >= 0
-                else consumer_id
-            )
+            # Merge the already-resident L1 portion's disposable copy with any
+            # normal L2-only load-back. One consumer event then represents the
+            # complete cached prefix, matching an L1-miss/L2-hit transfer.
+            self._enqueue_pending_shadow_loads()
+            return self.cache_controller.start_loading()
         return 0
 
     # ---- Query / Inspection APIs ----

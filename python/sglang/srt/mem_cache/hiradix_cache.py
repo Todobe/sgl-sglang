@@ -1265,10 +1265,10 @@ class HiRadixCache(RadixCache):
         self.pending_shadow_load.append((host_indices, req.last_node))
         return True
 
-    def _start_pending_shadow_loads(self) -> int:
-        """Start disposable H2D copies and return their model consumer id."""
+    def _enqueue_pending_shadow_loads(self) -> None:
+        """Add disposable L1-prefix copies to the current H2D batch."""
         if not self.pending_shadow_load:
-            return -1
+            return
 
         pending, self.pending_shadow_load = self.pending_shadow_load, []
         for host_indices, host_node in pending:
@@ -1287,11 +1287,6 @@ class HiRadixCache(RadixCache):
                 )
                 continue
             self.ongoing_shadow_load[shadow_id] = (device_indices, host_node)
-
-        # Although forward keeps using the shared L1 prefix, force-L2 mode is
-        # intended to reproduce L1-miss/L2-hit latency, so it must wait for the
-        # disposable H2D to finish.
-        return self.cache_controller.start_loading()
 
     def _make_eviction_heap(self):
         heap = [
@@ -1654,11 +1649,11 @@ class HiRadixCache(RadixCache):
         Notify the cache controller to start the KV cache loading.
         Return the consumer index for the schedule batch manager to track.
         """
-        consumer_id = self.cache_controller.start_loading()
-        shadow_consumer_id = self._start_pending_shadow_loads()
-        # Shadow loads are queued after normal load-back on the same load
-        # stream. Waiting for the shadow consumer therefore covers both.
-        return shadow_consumer_id if shadow_consumer_id >= 0 else consumer_id
+        # Merge the already-resident L1 portion's disposable copy with any
+        # normal L2-only load-back. One consumer event then represents the
+        # complete cached prefix, matching an L1-miss/L2-hit transfer.
+        self._enqueue_pending_shadow_loads()
+        return self.cache_controller.start_loading()
 
     def check_hicache_events(self):
         # Reap the previous round's PP-sync sends before issuing new ones.
