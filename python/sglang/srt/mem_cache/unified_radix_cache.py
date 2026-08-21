@@ -370,6 +370,7 @@ class UnifiedRadixCache(BasePrefixCache):
             self.cache_controller is not None
             and self.cache_controller.write_policy == "write_back"
         )
+        self.force_l2 = getattr(server_args, "hicache_force_l2", False)
         # Pre-seed the dropped-tokens series at 0 per pool
         if self.metrics_collector is not None and self.cache_controller is not None:
             for ct in self.tree_components:
@@ -378,7 +379,7 @@ class UnifiedRadixCache(BasePrefixCache):
                     reason="host_pressure",
                     pool=_COMPONENT_POOL_LABEL[ct],
                 )
-        self.load_back_threshold = 10
+        self.load_back_threshold = 1 if self.force_l2 else 10
         self.prefetch_stop_policy = server_args.hicache_storage_prefetch_policy
 
         if storage_backend is not None:
@@ -412,12 +413,19 @@ class UnifiedRadixCache(BasePrefixCache):
     def match_prefix(self, params: MatchPrefixParams) -> MatchResult:
         result = self.session.try_match_prefix(params)
         if result is not None:
-            logger.debug(
-                "[UnifiedRadixCache][match_prefix] SESSION HIT: "
-                "device_indices=%d, host_hit=%d",
-                len(result.device_indices),
-                result.host_hit_length,
-            )
+            hit_tokens = len(result.device_indices) + result.host_hit_length
+            key_len = len(params.key.page_aligned(self.page_size))
+            if hit_tokens > 0:
+                logger.info(
+                    "UnifiedRadixCache prefix hit: location=L1(session), "
+                    "hit_tokens=%d/%d (%.2f%%), L1_tokens=%d, L2_tokens=%d, "
+                    "L1_protected=true",
+                    hit_tokens,
+                    key_len,
+                    100.0 * hit_tokens / key_len if key_len else 0.0,
+                    len(result.device_indices),
+                    result.host_hit_length,
+                )
             return result
         if self.disable:
             return self.tree_core.empty_match_result
@@ -429,6 +437,34 @@ class UnifiedRadixCache(BasePrefixCache):
             result = component.finalize_match_result_in_cache(params, result)
         # Finalizers must not emit actions; the walk's were applied above.
         assert not result.cache_actions
+        l1_hit = len(result.device_indices)
+        l2_hit = result.host_hit_length
+        total_hit = l1_hit + l2_hit
+        if total_hit > 0:
+            key_len = len(params.key.page_aligned(self.page_size))
+            l1_protected = False
+            node = self.tree_core.node_by_id(result.last_device_node)
+            while node is not self.tree_core.root_node:
+                if node.component_data[BASE_COMPONENT_TYPE].lock_ref > 0:
+                    l1_protected = True
+                    break
+                node = node.parent
+            location = (
+                "L1+L2"
+                if l1_hit > 0 and l2_hit > 0
+                else ("L1" if l1_hit > 0 else "L2")
+            )
+            logger.info(
+                "UnifiedRadixCache prefix hit: location=%s, hit_tokens=%d/%d "
+                "(%.2f%%), L1_tokens=%d, L2_tokens=%d, L1_protected=%s",
+                location,
+                total_hit,
+                key_len,
+                100.0 * total_hit / key_len if key_len else 0.0,
+                l1_hit,
+                l2_hit,
+                l1_protected,
+            )
         logger.debug(
             "[UnifiedRadixCache][match_prefix] TREE: "
             "device_indices=%d, host_hit=%d, key_len=%d",
@@ -483,6 +519,34 @@ class UnifiedRadixCache(BasePrefixCache):
             swa_num_tokens_evicted=tracker.get(ComponentType.SWA, 0),
             mamba_num_evicted=tracker.get(ComponentType.MAMBA, 0),
         )
+
+    def force_l2_after_request(self) -> None:
+        if not self.force_l2 or self.cache_controller is None:
+            return
+
+        self.writing_check(write_back=True)
+        params = EvictParams(
+            num_tokens=self.full_evictable_size(),
+            swa_num_tokens=self.swa_evictable_size(),
+            mamba_num=self.mamba_evictable_size(),
+        )
+        if (
+            params.num_tokens <= 0
+            and params.swa_num_tokens <= 0
+            and params.mamba_num <= 0
+        ):
+            return
+        result = self.evict(params)
+        logger.info(
+            "UnifiedHiCache force-L2: evicted unlocked L1 tokens "
+            "(full=%d, swa=%d, mamba=%d) after request",
+            result.num_tokens_evicted,
+            result.swa_num_tokens_evicted,
+            result.mamba_num_evicted,
+        )
+
+    def supports_force_l2(self) -> bool:
+        return self.cache_controller is not None
 
     def _free_values(
         self,

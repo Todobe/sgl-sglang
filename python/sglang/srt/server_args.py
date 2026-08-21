@@ -2653,6 +2653,11 @@ class ServerArgs:
         "The size of host KV cache memory pool in gigabytes, which will override the hicache_ratio if set.",
         NS("memory"),
     ] = 0
+    hicache_force_l2: A[
+        bool,
+        "Debug option that writes prefix KV to L2 and evicts all unlocked L1 prefix KV after each finished request, forcing subsequent sequential cache hits to perform H2D load-back.",
+        NS("memory"),
+    ] = False
     hicache_write_policy: A[
         str,
         Arg(
@@ -8406,6 +8411,30 @@ class ServerArgs:
             )
 
     def _handle_other_validations(self):
+        if self.hicache_force_l2:
+            if not self.enable_hierarchical_cache:
+                raise ValueError(
+                    "--hicache-force-l2 requires --enable-hierarchical-cache"
+                )
+            if self.disaggregation_decode_enable_offload_kvcache:
+                raise ValueError(
+                    "--hicache-force-l2 is incompatible with "
+                    "--disaggregation-decode-enable-offload-kvcache because the "
+                    "decode offload manager bypasses the radix-cache release path"
+                )
+            if self.enable_streaming_session or self.enable_session_radix_cache:
+                raise ValueError(
+                    "--hicache-force-l2 is incompatible with streaming/session "
+                    "radix caches because session-held KV remains locked in L1"
+                )
+            if self.hicache_write_policy != "write_through":
+                logger.warning(
+                    "--hicache-force-l2 requires write-through backup; overriding "
+                    "--hicache-write-policy=%s with write_through",
+                    self.hicache_write_policy,
+                )
+                self.hicache_write_policy = "write_through"
+
         if self.default_chat_template_kwargs is not None and not isinstance(
             self.default_chat_template_kwargs, dict
         ):

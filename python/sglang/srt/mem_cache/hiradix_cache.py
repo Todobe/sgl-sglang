@@ -206,7 +206,8 @@ class HiRadixCache(RadixCache):
         self.write_through_threshold = (
             1 if server_args.hicache_write_policy == "write_through" else 2
         )
-        self.load_back_threshold = 10
+        self.force_l2 = getattr(server_args, "hicache_force_l2", False)
+        self.load_back_threshold = 1 if self.force_l2 else 10
         # Detach storage backend automatically on process shutdown
         atexit.register(self.shutdown)
 
@@ -1214,6 +1215,25 @@ class HiRadixCache(RadixCache):
         self.update_eviction_metrics(num_evicted, start_time)
         return EvictResult(num_tokens_evicted=num_evicted)
 
+    def force_l2_after_request(self) -> None:
+        if not self.force_l2:
+            return
+
+        # write-through is asynchronous. Do not discard an L1 node until its
+        # host copy is complete and visible to the radix tree.
+        self.writing_check(write_back=True)
+        evictable = self.evictable_size()
+        if evictable <= 0:
+            return
+        result = self.evict(EvictParams(num_tokens=evictable))
+        logger.info(
+            "HiCache force-L2: evicted %d unlocked tokens from L1 after request",
+            result.num_tokens_evicted,
+        )
+
+    def supports_force_l2(self) -> bool:
+        return True
+
     def _make_eviction_heap(self):
         heap = [
             (self.eviction_strategy.get_priority(node), node)
@@ -1841,12 +1861,33 @@ class HiRadixCache(RadixCache):
         while not last_host_node.backuped:
             last_host_node = last_host_node.parent
 
-        logger.debug(
-            "HiCache match_prefix: L1_device_hit=%d, L2_host_hit=%d, node_id=%d",
-            len(value),
-            host_hit_length,
-            last_host_node.id,
-        )
+        l1_hit = len(value)
+        total_hit = l1_hit + host_hit_length
+        if total_hit > 0:
+            l1_protected = False
+            node = last_node
+            while node is not self.root_node:
+                if node.lock_ref > 0:
+                    l1_protected = True
+                    break
+                node = node.parent
+            location = (
+                "L1+L2"
+                if l1_hit > 0 and host_hit_length > 0
+                else ("L1" if l1_hit > 0 else "L2")
+            )
+            logger.info(
+                "HiCache prefix hit: location=%s, hit_tokens=%d/%d (%.2f%%), "
+                "L1_tokens=%d, L2_tokens=%d, L1_protected=%s, node_id=%d",
+                location,
+                total_hit,
+                len(key),
+                100.0 * total_hit / len(key),
+                l1_hit,
+                host_hit_length,
+                l1_protected,
+                last_host_node.id,
+            )
 
         return MatchResult(
             device_indices=value,

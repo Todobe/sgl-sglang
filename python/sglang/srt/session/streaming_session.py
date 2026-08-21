@@ -235,6 +235,12 @@ class StreamingSession(BasePrefixCache):
         self.slots.clear()
         self.inner.reset()
 
+    def force_l2_after_request(self) -> None:
+        self.inner.force_l2_after_request()
+
+    def supports_force_l2(self) -> bool:
+        return self.inner.supports_force_l2()
+
     # -- Streaming entries: contract with embedded composers (e.g.
     # UnifiedRadixCache) is a uniform "try_handle_*" pattern. Each method
     # executes the streaming body if applicable and signals whether the

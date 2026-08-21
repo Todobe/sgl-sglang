@@ -230,6 +230,15 @@ def create_tree_cache(ctx: TreeCacheBuildContext) -> BasePrefixCache:
         cache = StreamingSession(cache)
         streaming_wrapped = True
 
+    if getattr(
+        ctx.server_args, "hicache_force_l2", False
+    ) and not cache.supports_force_l2():
+        raise ValueError(
+            "--hicache-force-l2 requires the built-in HiRadixCache or "
+            "HiCache-enabled UnifiedRadixCache; selected cache implementation "
+            f"is {type(cache).__name__}"
+        )
+
     logger.info(
         "Tree cache initialized: source=%s impl=%s hybrid_swa=%s hybrid_ssm=%s "
         "hierarchical=%s streaming_wrapped=%s",

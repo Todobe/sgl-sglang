@@ -329,6 +329,17 @@ class BasePrefixCache(ABC, PrefixCacheTrait):
     def evictable_size(self):
         return 0
 
+    def force_l2_after_request(self) -> None:
+        """Debug hook for forcing subsequent prefix hits through L2.
+
+        Cache implementations without hierarchical caching intentionally do
+        nothing. HiCache implementations override this method.
+        """
+        return
+
+    def supports_force_l2(self) -> bool:
+        return False
+
     def full_evictable_size(self):
         return 0
 
