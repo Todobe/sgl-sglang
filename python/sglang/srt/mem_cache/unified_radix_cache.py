@@ -578,10 +578,10 @@ class UnifiedRadixCache(BasePrefixCache):
         self.pending_shadow_load.append((host_indices, node_id, host_lock_params))
         return True
 
-    def _start_pending_shadow_loads(self) -> None:
-        """Start disposable H2D copies without adding them to a model consumer."""
+    def _start_pending_shadow_loads(self) -> int:
+        """Start disposable H2D copies and return their model consumer id."""
         if not self.pending_shadow_load:
-            return
+            return -1
 
         pending, self.pending_shadow_load = self.pending_shadow_load, []
         for host_indices, node_id, host_lock_params in pending:
@@ -610,9 +610,10 @@ class UnifiedRadixCache(BasePrefixCache):
                 host_lock_params,
             )
 
-        # Deliberately ignore the consumer id: model forward keeps using the
-        # shared L1 prefix and does not wait for this disposable transfer.
-        self.cache_controller.start_loading()
+        # Although forward keeps using the shared L1 prefix, force-L2 mode is
+        # intended to reproduce L1-miss/L2-hit latency, so it must wait for the
+        # disposable H2D to finish.
+        return self.cache_controller.start_loading()
 
     def _free_values(
         self,
@@ -2221,8 +2222,14 @@ class UnifiedRadixCache(BasePrefixCache):
         """Notify the cache controller to start the KV cache loading."""
         if self.cache_controller is not None:
             consumer_id = self.cache_controller.start_loading()
-            self._start_pending_shadow_loads()
-            return consumer_id
+            shadow_consumer_id = self._start_pending_shadow_loads()
+            # Shadow loads are queued after normal load-back on the same load
+            # stream. Waiting for the shadow consumer therefore covers both.
+            return (
+                shadow_consumer_id
+                if shadow_consumer_id >= 0
+                else consumer_id
+            )
         return 0
 
     # ---- Query / Inspection APIs ----

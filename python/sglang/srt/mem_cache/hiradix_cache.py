@@ -1265,10 +1265,10 @@ class HiRadixCache(RadixCache):
         self.pending_shadow_load.append((host_indices, req.last_node))
         return True
 
-    def _start_pending_shadow_loads(self) -> None:
-        """Start disposable H2D copies without adding them to a model consumer."""
+    def _start_pending_shadow_loads(self) -> int:
+        """Start disposable H2D copies and return their model consumer id."""
         if not self.pending_shadow_load:
-            return
+            return -1
 
         pending, self.pending_shadow_load = self.pending_shadow_load, []
         for host_indices, host_node in pending:
@@ -1288,9 +1288,10 @@ class HiRadixCache(RadixCache):
                 continue
             self.ongoing_shadow_load[shadow_id] = (device_indices, host_node)
 
-        # Deliberately ignore the consumer id: model forward keeps using the
-        # shared L1 prefix and does not wait for this disposable transfer.
-        self.cache_controller.start_loading()
+        # Although forward keeps using the shared L1 prefix, force-L2 mode is
+        # intended to reproduce L1-miss/L2-hit latency, so it must wait for the
+        # disposable H2D to finish.
+        return self.cache_controller.start_loading()
 
     def _make_eviction_heap(self):
         heap = [
@@ -1654,8 +1655,10 @@ class HiRadixCache(RadixCache):
         Return the consumer index for the schedule batch manager to track.
         """
         consumer_id = self.cache_controller.start_loading()
-        self._start_pending_shadow_loads()
-        return consumer_id
+        shadow_consumer_id = self._start_pending_shadow_loads()
+        # Shadow loads are queued after normal load-back on the same load
+        # stream. Waiting for the shadow consumer therefore covers both.
+        return shadow_consumer_id if shadow_consumer_id >= 0 else consumer_id
 
     def check_hicache_events(self):
         # Reap the previous round's PP-sync sends before issuing new ones.
