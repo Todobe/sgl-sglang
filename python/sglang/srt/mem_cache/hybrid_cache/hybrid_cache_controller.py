@@ -26,6 +26,7 @@ from sglang.srt.managers.cache_controller import (
 from sglang.srt.managers.cache_controller import (
     make_timing_event_pair,
 )
+from sglang.srt.managers.cache_controller import hicache_layer_timing_enabled
 from sglang.srt.mem_cache.hicache_storage import (
     HiCacheStorageExtraInfo,
     PoolHitPolicy,
@@ -559,6 +560,9 @@ class HybridCacheController(BaseHiCacheController):
         producer_event.start_event.record()
 
         ack_start_event, ack_finish_event, timing_enabled = make_timing_event_pair()
+        layer_finish_events = (
+            [] if timing_enabled and hicache_layer_timing_enabled() else None
+        )
 
         with device_module.stream(self.load_stream):
             producer_event.start_event.wait(self.load_stream)
@@ -610,6 +614,10 @@ class HybridCacheController(BaseHiCacheController):
                         pool_transfers=resolved_pool_transfers,
                         is_draft=True,
                     )
+                if layer_finish_events is not None:
+                    layer_finish_event = device_module.Event(enable_timing=True)
+                    layer_finish_event.record()
+                    layer_finish_events.append(layer_finish_event)
                 producer_event.complete(i)
             ack_finish_event.record()
             self._record_transfer_indices_on_stream(
@@ -627,6 +635,7 @@ class HybridCacheController(BaseHiCacheController):
                 timing_enabled=timing_enabled,
                 num_tokens_by_pool=self._num_tokens_by_pool(op),
                 num_bytes=self._transfer_num_bytes(op),
+                layer_finish_events=layer_finish_events,
             )
         )
         return producer_id

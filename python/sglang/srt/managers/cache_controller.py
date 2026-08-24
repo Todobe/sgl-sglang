@@ -40,7 +40,7 @@ from sglang.srt.layers.dp_attention import (
 )
 from sglang.srt.mem_cache.memory_pool import MLATokenToKVPool
 from sglang.srt.runtime_context import get_parallel
-from sglang.srt.utils import get_device_module
+from sglang.srt.utils import get_bool_env_var, get_device_module
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,11 @@ def make_timing_event_pair():
     timing_enabled = _timing_events_supported()
     kwargs = {"enable_timing": True} if timing_enabled else {}
     return device_module.Event(**kwargs), device_module.Event(**kwargs), timing_enabled
+
+
+@cache
+def hicache_layer_timing_enabled() -> bool:
+    return get_bool_env_var("SGLANG_LOG_HICACHE_LAYER_TIME")
 
 
 class LayerLoadingEvent:
@@ -168,6 +173,8 @@ class HiCacheAck(NamedTuple):
     # Total bytes moved by the op across all pools, including draft piggyback
     # and sidecar transfers that the per-pool token counts exclude.
     num_bytes: int = 0
+    # Optional timing events recorded after each layer's H2D operation.
+    layer_finish_events: Optional[List[device_module.Event]] = None
 
 
 class StorageOperation:
@@ -817,6 +824,9 @@ class HiCacheController:
         producer_event.start_event.record()
 
         ack_start_event, ack_finish_event, timing_enabled = make_timing_event_pair()
+        layer_finish_events = (
+            [] if timing_enabled and hicache_layer_timing_enabled() else None
+        )
 
         with device_module.stream(self.load_stream):
             producer_event.start_event.wait(self.load_stream)
@@ -837,6 +847,10 @@ class HiCacheController:
                         i,
                         self.io_backend,
                     )
+                if layer_finish_events is not None:
+                    layer_finish_event = device_module.Event(enable_timing=True)
+                    layer_finish_event.record()
+                    layer_finish_events.append(layer_finish_event)
                 producer_event.complete(i)
             ack_finish_event.record()
             # NOTE: We must save the host indices and device indices here,
@@ -856,6 +870,7 @@ class HiCacheController:
                 timing_enabled=timing_enabled,
                 num_tokens_by_pool={PoolName.KV.value: len(op.device_indices)},
                 num_bytes=self._transfer_num_bytes(op),
+                layer_finish_events=layer_finish_events,
             )
         )
         return producer_id

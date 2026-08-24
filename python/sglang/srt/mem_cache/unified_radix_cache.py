@@ -2110,6 +2110,20 @@ class UnifiedRadixCache(BasePrefixCache):
                     "UnifiedHiCache H2D completed: tokens=%d, duration_ms=unavailable",
                     ack.num_tokens,
                 )
+            if ack.layer_finish_events:
+                previous_event = ack.start_event
+                layer_duration_ms = []
+                for finish_event in ack.layer_finish_events:
+                    layer_duration_ms.append(
+                        previous_event.elapsed_time(finish_event)
+                    )
+                    previous_event = finish_event
+                logger.info(
+                    "UnifiedHiCache H2D per-layer: tokens=%d, "
+                    "layer_duration_ms=[%s]",
+                    ack.num_tokens,
+                    ",".join(f"{value:.3f}" for value in layer_duration_ms),
+                )
             for ack_id in ack.node_ids:
                 shadow = self.ongoing_shadow_load.pop(ack_id, None)
                 if shadow is not None:
