@@ -2672,6 +2672,14 @@ def cli_main():
         help="Keep requests in order without shuffling. By default, requests are shuffled randomly.",
     )
     group.add_argument(
+        "--gsp-interleave-groups",
+        action="store_true",
+        help=(
+            "Order uniform prefix groups in round-robin order: "
+            "A1,B1,...,A2,B2,... . Mutually exclusive with --gsp-ordered."
+        ),
+    )
+    group.add_argument(
         "--gsp-group-distribution",
         type=str,
         choices=["uniform", "zipf"],

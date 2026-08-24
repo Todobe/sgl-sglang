@@ -275,6 +275,7 @@ def make_args(**overrides):
         "gsp_send_routing_key": False,
         "gsp_num_turns": 1,
         "gsp_ordered": False,
+        "gsp_interleave_groups": False,
         "gsp_group_distribution": "uniform",
         "gsp_zipf_alpha": None,
         "seed": 1,
@@ -1002,6 +1003,7 @@ class TestBenchmarkDatasetsAPI(CustomTestCase):
         num_turns=1,
         send_routing_key=False,
         ordered=True,
+        interleave_groups=False,
         range_ratio=1.0,
         system_prompt_len=4,
         question_len=3,
@@ -1028,6 +1030,7 @@ class TestBenchmarkDatasetsAPI(CustomTestCase):
             num_turns=num_turns,
             fast_prepare=fast_prepare,
             ordered=ordered,
+            interleave_groups=interleave_groups,
             group_distribution=mode,
             zipf_alpha=alpha,
         )
@@ -1047,6 +1050,27 @@ class TestBenchmarkDatasetsAPI(CustomTestCase):
         )
         self.assertEqual(len(rows_a), 3 * 4)
         self.assertEqual(self._row_fields(rows_a), self._row_fields(rows_b))
+
+    def test_gsp_uniform_interleave_groups(self):
+        common = dict(
+            mode="uniform",
+            num_groups=3,
+            prompts_per_group=2,
+            seed=17,
+            range_ratio=0.5,  # Bypass the on-disk cache in this ordering test.
+        )
+        ordered = self._run_gsp(ordered=True, **common)
+        interleaved = self._run_gsp(
+            ordered=False, interleave_groups=True, **common
+        )
+
+        expected_indices = [0, 2, 4, 1, 3, 5]
+        expected = [self._row_fields(ordered)[i] for i in expected_indices]
+        self.assertEqual(self._row_fields(interleaved), expected)
+
+    def test_gsp_interleave_rejects_ordered(self):
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            self._run_gsp(ordered=True, interleave_groups=True, range_ratio=0.5)
 
     def test_gsp_uniform_cache_path_format_unchanged(self):
         # The uniform-mode cache filename keeps its existing

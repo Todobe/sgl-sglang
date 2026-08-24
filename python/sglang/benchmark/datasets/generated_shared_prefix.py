@@ -49,6 +49,7 @@ class GeneratedSharedPrefixDataset(BaseDataset):
     send_routing_key: bool
     num_turns: int
     ordered: bool
+    interleave_groups: bool
     group_distribution: str = "uniform"
     zipf_alpha: Optional[float] = None
 
@@ -82,6 +83,16 @@ class GeneratedSharedPrefixDataset(BaseDataset):
                 "--gsp-group-distribution=zipf; remove --gsp-zipf-alpha "
                 "or set --gsp-group-distribution=zipf"
             )
+        interleave_groups = getattr(args, "gsp_interleave_groups", False)
+        if interleave_groups and getattr(args, "gsp_ordered", False):
+            raise ValueError(
+                "--gsp-interleave-groups and --gsp-ordered are mutually exclusive"
+            )
+        if interleave_groups and group_distribution != "uniform":
+            raise ValueError(
+                "--gsp-interleave-groups requires "
+                "--gsp-group-distribution=uniform"
+            )
 
         return cls(
             num_groups=args.gsp_num_groups,
@@ -95,6 +106,7 @@ class GeneratedSharedPrefixDataset(BaseDataset):
             send_routing_key=getattr(args, "gsp_send_routing_key", False),
             num_turns=getattr(args, "gsp_num_turns", 1),
             ordered=getattr(args, "gsp_ordered", False),
+            interleave_groups=interleave_groups,
             group_distribution=group_distribution,
             zipf_alpha=zipf_alpha,
         )
@@ -115,6 +127,7 @@ class GeneratedSharedPrefixDataset(BaseDataset):
             num_turns=self.num_turns,
             fast_prepare=self.fast_prepare,
             ordered=self.ordered,
+            interleave_groups=self.interleave_groups,
             group_distribution=self.group_distribution,
             zipf_alpha=self.zipf_alpha,
         )
@@ -130,6 +143,7 @@ def get_gen_prefix_cache_path(
     tokenizer,
     group_distribution: str = "uniform",
     zipf_alpha: Optional[float] = None,
+    interleave_groups: bool = False,
 ):
     """Create cache directory under ~/.cache/sglang/benchmark.
 
@@ -142,6 +156,8 @@ def get_gen_prefix_cache_path(
     suffix = ""
     if group_distribution != "uniform":
         suffix = f"_{group_distribution}_{zipf_alpha}"
+    if interleave_groups:
+        suffix += "_interleaved"
 
     cache_key = (
         f"gen_shared_prefix_{seed}_{num_groups}_{prompts_per_group}_"
@@ -164,6 +180,7 @@ def sample_generated_shared_prefix_requests(
     num_turns: int = 1,
     fast_prepare: bool = False,
     ordered: bool = False,
+    interleave_groups: bool = False,
     group_distribution: str = "uniform",
     zipf_alpha: Optional[float] = None,
 ) -> List[DatasetRow]:
@@ -190,7 +207,14 @@ def sample_generated_shared_prefix_requests(
         tokenizer,
         group_distribution=group_distribution,
         zipf_alpha=zipf_alpha,
+        interleave_groups=interleave_groups,
     )
+    if interleave_groups and ordered:
+        raise ValueError(
+            "interleave_groups and ordered are mutually exclusive"
+        )
+    if interleave_groups and group_distribution != "uniform":
+        raise ValueError("interleave_groups requires group_distribution='uniform'")
     # range_ratio != 1 / num_turns > 1 perturb the payload but are not in the
     # cache key; send_routing_key embeds a per-run uuid + timestamp that is
     # meaningless to cache. Bypass for these pre-existing reasons only.
@@ -297,7 +321,17 @@ def sample_generated_shared_prefix_requests(
         total_input_tokens += prompt_len
         total_output_tokens += output_len_val
 
-    if not ordered:
+    if interleave_groups:
+        # Generation order is group-major:
+        #   A1, A2, ..., B1, B2, ...
+        # Convert it to prompt-major round robin:
+        #   A1, B1, ..., A2, B2, ...
+        input_requests = [
+            input_requests[group_idx * prompts_per_group + prompt_idx]
+            for prompt_idx in range(prompts_per_group)
+            for group_idx in range(num_groups)
+        ]
+    elif not ordered:
         random.shuffle(input_requests)
 
     print(f"\nGenerated shared prefix dataset statistics:")
