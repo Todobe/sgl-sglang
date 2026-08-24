@@ -2094,7 +2094,22 @@ class UnifiedRadixCache(BasePrefixCache):
         while finish_count > 0:
             ack = cc.ack_load_queue.pop(0)
             ack.finish_event.synchronize()
-            logger.info("UnifiedHiCache H2D completed: tokens=%d", ack.num_tokens)
+            duration_ms = (
+                ack.start_event.elapsed_time(ack.finish_event)
+                if ack.timing_enabled
+                else None
+            )
+            if duration_ms is not None:
+                logger.info(
+                    "UnifiedHiCache H2D completed: tokens=%d, duration_ms=%.3f",
+                    ack.num_tokens,
+                    duration_ms,
+                )
+            else:
+                logger.info(
+                    "UnifiedHiCache H2D completed: tokens=%d, duration_ms=unavailable",
+                    ack.num_tokens,
+                )
             for ack_id in ack.node_ids:
                 shadow = self.ongoing_shadow_load.pop(ack_id, None)
                 if shadow is not None:
@@ -2121,8 +2136,7 @@ class UnifiedRadixCache(BasePrefixCache):
                         )
                 if ack.num_bytes > 0:
                     self.metrics_collector.increment_load_back_num_bytes(ack.num_bytes)
-                if ack.timing_enabled:
-                    duration_ms = ack.start_event.elapsed_time(ack.finish_event)
+                if duration_ms is not None:
                     self.metrics_collector.observe_load_back_duration(
                         duration_ms / 1000.0
                     )
