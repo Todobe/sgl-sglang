@@ -26,6 +26,7 @@ from sglang.srt.mem_cache.pool_host.base import (
 )
 from sglang.srt.mem_cache.pool_host.common import (
     ALLOC_MEMORY_FUNCS,
+    aclrt_io_enabled,
     alloc_with_hybm,
     ascendc_io_enabled,
     ensure_hybm_capacity,
@@ -57,6 +58,8 @@ if _is_npu:
 logger = logging.getLogger(__name__)
 
 _ASCENDC_LAYER_GROUP_DEFAULT = 2
+_ACL_MEMCPY_HOST_TO_DEVICE = 1
+_ACL_MEMCPY_DEVICE_TO_HOST = 2
 
 
 def _ascendc_layer_group_size() -> int:
@@ -542,6 +545,144 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
         if ret != 0:
             raise RuntimeError(f"offload.kv_exchange_copy failed with code {ret}")
 
+    @staticmethod
+    def _aclrt_page_pairs(host_indices, device_indices, page_size):
+        """Collapse token indices into aligned (host_page, device_page) pairs."""
+        host = host_indices.detach().cpu().tolist()
+        device = device_indices.detach().cpu().tolist()
+        if len(host) != len(device) or len(host) % page_size != 0:
+            raise ValueError(
+                "ACLRT HiCache transfer requires equally sized whole pages: "
+                f"host={len(host)}, device={len(device)}, page_size={page_size}"
+            )
+        pairs = []
+        for offset in range(0, len(host), page_size):
+            host_base = int(host[offset])
+            device_base = int(device[offset])
+            if host_base % page_size or device_base % page_size:
+                raise ValueError(
+                    "ACLRT HiCache transfer requires page-aligned token indices: "
+                    f"host={host_base}, device={device_base}, page_size={page_size}"
+                )
+            expected = list(range(page_size))
+            if (
+                [int(x) - host_base for x in host[offset : offset + page_size]]
+                != expected
+                or [int(x) - device_base for x in device[offset : offset + page_size]]
+                != expected
+            ):
+                raise ValueError("ACLRT HiCache transfer requires contiguous pages")
+            pairs.append((host_base // page_size, device_base // page_size))
+        return pairs
+
+    def _transfer_aclrt_async_copy(
+        self,
+        device_pool,
+        host_indices,
+        device_indices,
+        direction: TransferDirection,
+        *,
+        layer_start: int,
+        layer_num: int,
+        index_k_layer_start: int,
+        index_k_layer_num: int,
+    ) -> None:
+        """Copy one MLA layer group with pyACL SDMA, without an AIV kernel.
+
+        Host tensors are page-first and device tensors are layer-first.  For
+        each selected page, one memcpy2d_async copies ``layer_num`` rows; the
+        source and destination pitches perform the layout exchange.
+        """
+        try:
+            import acl
+        except ImportError as exc:
+            raise RuntimeError(
+                "SGLANG_HICACHE_IO_ACLRT=1 requires pyACL from the active CANN installation"
+            ) from exc
+
+        stream = torch.npu.current_stream()
+        stream_ptr = int(stream.npu_stream)
+        page_pairs = self._aclrt_page_pairs(
+            host_indices, device_indices, self.page_size
+        )
+        if not page_pairs:
+            return
+
+        def enqueue_component(dev_t, host_t, lo, count):
+            if dev_t is None or host_t is None or count <= 0:
+                return
+            if dev_t.element_size() != host_t.element_size():
+                raise ValueError(
+                    "ACLRT HiCache source/destination element sizes differ: "
+                    f"device={dev_t.element_size()}, host={host_t.element_size()}"
+                )
+            itemsize = dev_t.element_size()
+            page_bytes = dev_t[0, 0].numel() * itemsize
+            host_page_bytes = host_t[0, 0].numel() * itemsize
+            if page_bytes != host_page_bytes:
+                raise ValueError(
+                    "ACLRT HiCache source/destination page sizes differ: "
+                    f"device={page_bytes}, host={host_page_bytes}"
+                )
+            dev_layer_pitch = dev_t.stride(0) * itemsize
+            host_layer_pitch = host_t.stride(1) * itemsize
+            for host_page, device_page in page_pairs:
+                host_ptr = (
+                    host_t.data_ptr()
+                    + host_page * host_t.stride(0) * itemsize
+                    + lo * host_t.stride(1) * itemsize
+                )
+                device_ptr = (
+                    dev_t.data_ptr()
+                    + lo * dev_t.stride(0) * itemsize
+                    + device_page * dev_t.stride(1) * itemsize
+                )
+                if direction == TransferDirection.H2D:
+                    dst, dpitch, src, spitch, kind = (
+                        device_ptr,
+                        dev_layer_pitch,
+                        host_ptr,
+                        host_layer_pitch,
+                        _ACL_MEMCPY_HOST_TO_DEVICE,
+                    )
+                else:
+                    dst, dpitch, src, spitch, kind = (
+                        host_ptr,
+                        host_layer_pitch,
+                        device_ptr,
+                        dev_layer_pitch,
+                        _ACL_MEMCPY_DEVICE_TO_HOST,
+                    )
+                ret = acl.rt.memcpy2d_async(
+                    dst, dpitch, src, spitch, page_bytes, count, kind, stream_ptr
+                )
+                if int(ret) != 0:
+                    raise RuntimeError(
+                        "acl.rt.memcpy2d_async failed with ACL error code "
+                        f"{int(ret)}"
+                    )
+
+        enqueue_component(
+            device_pool.k_buffer, self.k_buffer, layer_start, layer_num
+        )
+        if device_pool.v_buffer.numel() and self.v_buffer.numel():
+            enqueue_component(
+                device_pool.v_buffer, self.v_buffer, layer_start, layer_num
+            )
+        if index_k_layer_num > 0:
+            enqueue_component(
+                device_pool.index_k_buffer,
+                self.index_k_buffer,
+                index_k_layer_start,
+                index_k_layer_num,
+            )
+            enqueue_component(
+                getattr(device_pool, "index_k_scale_buffer", None),
+                self.index_k_scale_buffer,
+                index_k_layer_start,
+                index_k_layer_num,
+            )
+
     def load_to_device_per_layer(
         self,
         device_pool,
@@ -633,6 +774,21 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
                 raise ValueError(f"Unsupported layout: {self.layout}")
         elif io_backend == "kernel_ascend":
             if self.layout == "page_first_kv_split":
+                if _is_npu and aclrt_io_enabled():
+                    group = self._ascendc_layer_group(device_pool, device_layer_id)
+                    if group is not None:
+                        layer_start, layer_num, ik_start, ik_num = group
+                        self._transfer_aclrt_async_copy(
+                            device_pool,
+                            host_indices,
+                            device_indices,
+                            TransferDirection.H2D,
+                            layer_start=layer_start,
+                            layer_num=layer_num,
+                            index_k_layer_start=ik_start,
+                            index_k_layer_num=ik_num,
+                        )
+                    return
                 if _is_npu and ascendc_io_enabled():
                     # AscendC layer-group pipelining: at each group boundary
                     # layer, launch one fused kv_exchange kernel covering the

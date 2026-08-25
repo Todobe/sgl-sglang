@@ -283,6 +283,19 @@ def ascendc_io_enabled() -> bool:
     )
 
 
+def aclrt_io_enabled() -> bool:
+    """Use pyACL SDMA copies for NPU HiCache L2<->L1 IO.
+
+    Unlike the AscendC path this does not launch an AIV kernel.  The caller
+    enqueues acl.rt.memcpy2d_async directly on the torch-npu load stream.
+    """
+    return os.environ.get("SGLANG_HICACHE_IO_ACLRT", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Sync-free H2D upload (NPU)
 #

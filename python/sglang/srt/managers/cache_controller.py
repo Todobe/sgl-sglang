@@ -39,7 +39,11 @@ from sglang.srt.layers.dp_attention import (
     is_dp_attention_enabled,
 )
 from sglang.srt.mem_cache.memory_pool import MLATokenToKVPool
-from sglang.srt.mem_cache.pool_host.common import ascendc_io_enabled, to_device_no_sync
+from sglang.srt.mem_cache.pool_host.common import (
+    aclrt_io_enabled,
+    ascendc_io_enabled,
+    to_device_no_sync,
+)
 from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import get_device_module
 
@@ -304,7 +308,24 @@ class HiCacheController:
         self.ack_write_queue: List[HiCacheAck] = []
 
         self.write_stream = device_module.Stream()
-        self.load_stream = device_module.Stream()
+        if aclrt_io_enabled() and ascendc_io_enabled():
+            raise ValueError(
+                "SGLANG_HICACHE_IO_ACLRT and SGLANG_HICACHE_IO_ASCENDC are "
+                "mutually exclusive"
+            )
+        if aclrt_io_enabled():
+            # Direct pyACL submission must not overtake torch-npu's userspace
+            # task queue.  SyncLaunchStream submits event waits/records to ACL
+            # immediately, preserving their order with memcpy2d_async without
+            # a device- or stream-wide synchronization.
+            stream_cls = getattr(device_module, "SyncLaunchStream", None)
+            if stream_cls is None:
+                raise RuntimeError(
+                    "SGLANG_HICACHE_IO_ACLRT=1 requires torch-npu SyncLaunchStream"
+                )
+            self.load_stream = stream_cls()
+        else:
+            self.load_stream = device_module.Stream()
 
         # If a storage backend is provided at startup, treat it as an implicit attach,
         # so init/runtime share the same lifecycle semantics and code paths.
@@ -800,6 +821,11 @@ class HiCacheController:
                     f"Unsupported layout {self.mem_pool_host.layout!r} for io backend 'direct'"
                 )
         elif self.io_backend == "kernel_ascend":
+            if aclrt_io_enabled():
+                # pyACL builds the 2D-copy descriptors on the host.  Keep both
+                # page-index arrays on CPU; the KV payload itself is enqueued
+                # asynchronously on the torch-npu load stream.
+                return host_indices.cpu(), device_indices.cpu()
             if ascendc_io_enabled():
                 # The fused acc_offload kv_exchange kernel reads the token
                 # indices directly on the device; keeping them there avoids
