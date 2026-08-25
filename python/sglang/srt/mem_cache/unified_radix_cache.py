@@ -412,12 +412,19 @@ class UnifiedRadixCache(BasePrefixCache):
     def match_prefix(self, params: MatchPrefixParams) -> MatchResult:
         result = self.session.try_match_prefix(params)
         if result is not None:
-            logger.debug(
-                "[UnifiedRadixCache][match_prefix] SESSION HIT: "
-                "device_indices=%d, host_hit=%d",
-                len(result.device_indices),
-                result.host_hit_length,
-            )
+            hit_tokens = len(result.device_indices) + result.host_hit_length
+            key_len = len(params.key.page_aligned(self.page_size))
+            if hit_tokens > 0:
+                logger.info(
+                    "UnifiedRadixCache prefix hit: location=L1(session), "
+                    "hit_tokens=%d/%d (%.2f%%), L1_tokens=%d, L2_tokens=%d, "
+                    "L1_protected=true",
+                    hit_tokens,
+                    key_len,
+                    100.0 * hit_tokens / key_len if key_len else 0.0,
+                    len(result.device_indices),
+                    result.host_hit_length,
+                )
             return result
         if self.disable:
             return self.tree_core.empty_match_result
@@ -429,6 +436,34 @@ class UnifiedRadixCache(BasePrefixCache):
             result = component.finalize_match_result_in_cache(params, result)
         # Finalizers must not emit actions; the walk's were applied above.
         assert not result.cache_actions
+        l1_hit = len(result.device_indices)
+        l2_hit = result.host_hit_length
+        total_hit = l1_hit + l2_hit
+        if total_hit > 0:
+            key_len = len(params.key.page_aligned(self.page_size))
+            l1_protected = False
+            node = self.tree_core.node_by_id(result.last_device_node)
+            while node is not self.tree_core.root_node:
+                if node.component_data[BASE_COMPONENT_TYPE].lock_ref > 0:
+                    l1_protected = True
+                    break
+                node = node.parent
+            location = (
+                "L1+L2"
+                if l1_hit > 0 and l2_hit > 0
+                else ("L1" if l1_hit > 0 else "L2")
+            )
+            logger.info(
+                "UnifiedRadixCache prefix hit: location=%s, hit_tokens=%d/%d "
+                "(%.2f%%), L1_tokens=%d, L2_tokens=%d, L1_protected=%s",
+                location,
+                total_hit,
+                key_len,
+                100.0 * total_hit / key_len if key_len else 0.0,
+                l1_hit,
+                l2_hit,
+                l1_protected,
+            )
         logger.debug(
             "[UnifiedRadixCache][match_prefix] TREE: "
             "device_indices=%d, host_hit=%d, key_len=%d",

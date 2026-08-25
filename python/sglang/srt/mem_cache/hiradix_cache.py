@@ -1841,12 +1841,33 @@ class HiRadixCache(RadixCache):
         while not last_host_node.backuped:
             last_host_node = last_host_node.parent
 
-        logger.debug(
-            "HiCache match_prefix: L1_device_hit=%d, L2_host_hit=%d, node_id=%d",
-            len(value),
-            host_hit_length,
-            last_host_node.id,
-        )
+        l1_hit = len(value)
+        total_hit = l1_hit + host_hit_length
+        if total_hit > 0:
+            l1_protected = False
+            node = last_node
+            while node is not self.root_node:
+                if node.lock_ref > 0:
+                    l1_protected = True
+                    break
+                node = node.parent
+            location = (
+                "L1+L2"
+                if l1_hit > 0 and host_hit_length > 0
+                else ("L1" if l1_hit > 0 else "L2")
+            )
+            logger.info(
+                "HiCache prefix hit: location=%s, hit_tokens=%d/%d (%.2f%%), "
+                "L1_tokens=%d, L2_tokens=%d, L1_protected=%s, node_id=%d",
+                location,
+                total_hit,
+                len(key),
+                100.0 * total_hit / len(key),
+                l1_hit,
+                host_hit_length,
+                l1_protected,
+                last_host_node.id,
+            )
 
         return MatchResult(
             device_indices=value,
