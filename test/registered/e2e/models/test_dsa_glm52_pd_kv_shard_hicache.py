@@ -19,7 +19,7 @@ from sglang.test.server_fixtures.disaggregation_fixture import (
     PDDisaggregationServerBase,
 )
 
-register_cuda_ci(est_time=600, stage="base-c", runner_config="4-gpu-gb300")
+register_cuda_ci(est_time=738, stage="base-c", runner_config="4-gpu-gb300")
 
 PAGE_SIZE = 64
 PREFILL_POOL_TOKENS = 4096  # Per rank: CP2 has 8192 logical GPU slots.
