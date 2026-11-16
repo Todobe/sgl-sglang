@@ -23,7 +23,7 @@ from sglang.srt.layers.attention.dsa.dsa_token_shard_layout import plan_dsa_toke
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
 
-register_cpu_ci(est_time=3, suite="base-a-test-cpu")
+register_cpu_ci(est_time=4, suite="base-a-test-cpu")
 
 
 def _brute(extend_seq_lens, seq_lens, tp_size, tp_rank):
